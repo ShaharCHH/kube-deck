@@ -1,0 +1,4 @@
+{
+  "description": "kube-deck hooks module",
+  "modules": ["./register.js"]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "kube-deck",
+  "version": "0.1.0",
+  "description": "Cluster + project banner, approval prompt for cluster-changing commands on prod, approve-all switch, and a todo list",
+  "author": { "name": "Shahar" }
+}
