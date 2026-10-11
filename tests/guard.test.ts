@@ -11,12 +11,13 @@ function world(on: any, opts: { kubeconfig: string; answer?: string }) {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.store(on)
   mock.env(on, { KUBECONFIG: opts.kubeconfig, HOME: '/home/t' })
-  const seen = { asks: [] as string[], ran: [] as string[], audit: [] as any[] }
+  const seen = { asks: [] as string[], ran: [] as string[], audit: [] as any[], modes: [] as string[] }
   on('session.root', () => ({ value: '/work/my-repo' }))
   on('process.run', (_$: any, e: any) => {
     const argv: string[] = e.argv
     if (argv[0] === 'oc') return { value: { exitCode: 0, stdout: KUBECONFIG_JSON, stderr: '' } }
-    if (argv[0] === 'tee') seen.audit.push(JSON.parse(String(e.init?.stdin).trim()))
+    if (argv[0] === 'chmod') seen.modes.push(argv[1] + ' ' + argv[2])
+    if (argv[0] === 'sh' && /umask 077/.test(argv[2] ?? '') && /tee -a/.test(argv[2])) seen.audit.push(JSON.parse(String(e.init?.stdin).trim()))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   // $.ui.ask is a tool.call of AskUserQuestion: answer it as the person would
@@ -41,6 +42,9 @@ test('prod: a refused change is denied and audited, a read passes', async ($, on
   expect(seen.ran).toEqual([])
   expect(seen.audit.at(-1).outcome).toBe('refused')
   expect(seen.audit.at(-1).prod).toBe(true)
+  // audit log holds full command lines: private dir and file
+  expect(seen.modes).toContain('700 /home/t/.kube-deck')
+  expect(seen.modes).toContain('600 /home/t/.kube-deck/audit.jsonl')
 
   const read: any = await $.tool.call({ tool: 'Bash', command: 'oc get pods' } as any)
   expect(read.deny).toBeUndefined()

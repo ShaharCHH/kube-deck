@@ -169,7 +169,9 @@ async function audit($, at, command, outcome, retarget) {
     const home = (await $.env.get('HOME')) ?? ''
     if (!home) throw new Error('no HOME')
     const dir = home + '/' + AUDIT_DIR
+    // The log holds full command lines: keep it private to this user (dir 0700, file 0600).
     await $.process.run(['mkdir', '-p', dir], { timeoutMs: 3000 })
+    await $.process.run(['chmod', '700', dir], { timeoutMs: 3000 })
     const line = JSON.stringify({
       ts: isoTime(at),
       outcome,
@@ -180,8 +182,11 @@ async function audit($, at, command, outcome, retarget) {
       retargeted: retarget || undefined,
       command: maskCommand(command),
     })
-    const r = await $.process.run(['tee', '-a', dir + '/audit.jsonl'], { stdin: line + '\n', timeoutMs: 3000 })
+    // umask 077 so a new file is born 0600; chmod below also fixes a file made by an older version.
+    const file = dir + '/audit.jsonl'
+    const r = await $.process.run(['sh', '-c', 'umask 077; exec tee -a "$1" >/dev/null', 'sh', file], { stdin: line + '\n', timeoutMs: 3000 })
     if (r.exitCode !== 0) throw new Error('tee exit ' + r.exitCode)
+    await $.process.run(['chmod', '600', file], { timeoutMs: 3000 })
   } catch {
     $.ui.toast('kube-deck: audit log write FAILED for a cluster command')
   }

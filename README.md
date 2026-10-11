@@ -19,7 +19,7 @@ Claude Code mod (CLI + desktop). Needs Claude Code >= 2.1.287.
   - Secret objects (yaml and json): `data` / `stringData` values and the `last-applied-configuration` annotation become `<redacted>`.
   - Withheld whole: `oc whoami -t`, `create token`, `get-token`, and secret reads that are reshaped (`jsonpath`, `jq`, `base64`, `cat`, `grep`, ...).
   - A note `[kube-deck: N secret value(s) redacted]` is appended so Claude knows. You get a toast.
-- **Audit log:** `~/.kube-deck/audit.jsonl`, one JSON line per cluster-changing command: time, outcome (approved / auto / non-prod / refused), cluster, project, repo, command (tokens masked). `/audit` shows the path and the last 10.
+- **Audit log:** `~/.kube-deck/audit.jsonl` (dir 0700, file 0600; older world-readable files are tightened on the next write), one JSON line per cluster-changing command: time, outcome (approved / auto / non-prod / refused), cluster, project, repo, command (tokens masked). `/audit` shows the path and the last 10.
 - **Todo (per repo):** each project root has its own list, kept in `$.store` (shared by all sessions on the machine). `/todo add <text>` adds from the prompt.
 - **Claude adds todos on its own:** tool `mcp__kube-deck__todo` (list / add / done / update, no delete) plus a short static system-prompt section telling it to add concrete follow-ups without asking. Its items are tagged `· claude`, duplicates are skipped, you get a toast per change, you discard with `x`. It edits an item only after discussing it with you.
 - **Refresh:** cluster and project are re-read on every prompt (3s timeout), at session start, on `/ctx`, and around each cluster command.
