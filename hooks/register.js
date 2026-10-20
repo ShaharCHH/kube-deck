@@ -1,10 +1,25 @@
+import { atom, update } from 'claude-code'
 import { classify } from './classify.js'
 import { redactOutput } from './redact.js'
+
+// What was picked in the panel (AWS_PROFILE, KUBECONFIG), kept in $.state: a hot reload resets
+// module variables but not this, and the process environment keeps the pick after a reload while
+// Claude's shell never had it.
+const PICKED_REF = { plugin: 'kube-deck', key: 'picked' }
+const pickedAtom = atom(PICKED_REF, {})
 
 // ---------------------------------------------------------------- config (edit)
 // A cluster counts as prod when any of these match the kubeconfig path, the cluster
 // name, or the API server URL. Unknown cluster (no kubeconfig / oc missing) = strict.
 const PROD_PATTERNS = [/prod/i]
+// ...and ONLY a cluster that matches one of these is trusted as non-prod. Matched against the
+// kubeconfig FILE name, the cluster name and the API host (not the folder, so a home directory
+// called "devops" marks nothing). A name that matches neither list is "unlisted" and is treated
+// as prod, so a prod cluster nobody named "prod" still gets asked. PROD_PATTERNS wins over this.
+// A letter on either side breaks a match, so "devops" is not "dev"; digits and - _ . do not.
+const NONPROD_PATTERNS = [
+  /(^|[^a-z])(sandbox|dev|test|staging|stage|qa|lab|demo|local|minikube|kind|crc|docker-desktop|rancher-desktop)([^a-z]|$)/i,
+]
 // Used only to READ the local kubeconfig (`config view --minify`), never talks to a cluster.
 const KUBE_CLI = 'oc'
 // Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
@@ -45,7 +60,8 @@ const THEME = {
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
 // approveAll is deliberately never persisted: every new session starts guarded.
-let cluster = { known: false, name: '', namespace: '', server: '', isProd: true }
+// level: strict (unreadable) | prod (matches PROD_PATTERNS) | unlisted (matches neither list) | nonprod
+let cluster = { known: false, name: '', namespace: '', server: '', isProd: true, level: 'strict' }
 let approveAll = false
 let approveUntil = 0
 let todos = []
@@ -64,10 +80,10 @@ let kubeconfig = ''
 let kubeServerDraft = ''
 let kubeLogin = { status: 'idle', last: null }
 let kubeLoginWanted = false
-// Values picked in the panel (AWS_PROFILE, KUBECONFIG). `$.env.set` alone does not reach the shell
-// Claude's Bash tool runs (checked: AWS_PROFILE stayed empty there after a pick), so the guard
-// puts them in front of each Bash command it forwards.
-let picked = {}
+// Where the AWS profile on show came from: env (AWS_PROFILE, which Claude's shell has too, unless
+// it was set by a pick), file (.aws-profile) or only (the one profile in ~/.aws/config). The last
+// two are not in Claude's shell, so the guard exports them.
+let awsSource = 'env'
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
 // Adding a profile from an SSO start URL: what was typed, the state of that flow, and the
@@ -129,10 +145,24 @@ async function refreshCluster($) {
   const name = file && file !== 'config' ? file : prettyName(entryName, server)
   const known = Boolean(info && name)
   const haystack = [kubeconfig, name, entryName, server].join(' ')
-  const isProd = !known || PROD_PATTERNS.some((re) => re.test(haystack))
+  // non-prod is trusted only by name: file name, cluster name, API host (never the folder)
+  const host = /^https?:\/\/([^:/]+)/.exec(server)?.[1] ?? ''
+  const nameHaystack = [kubeconfig.split(':')[0].split('/').pop(), name, entryName, host].join(' ')
+  const level = !known
+    ? 'strict'
+    : PROD_PATTERNS.some((re) => re.test(haystack))
+      ? 'prod'
+      : NONPROD_PATTERNS.some((re) => re.test(nameHaystack))
+        ? 'nonprod'
+        : 'unlisted'
 
-  cluster = { known, name, namespace, server, isProd }
+  cluster = { known, name, namespace, server, isProd: level !== 'nonprod', level }
   $.ui.invalidate('ui.render')
+}
+
+// How the cluster is called in prompts and replies.
+function levelLabel() {
+  return cluster.level === 'nonprod' ? 'non-prod' : cluster.level === 'unlisted' ? 'not marked non-prod, treated as prod' : cluster.level === 'prod' ? 'PROD' : 'unknown, treated as prod'
 }
 
 // ---- aws
@@ -158,6 +188,7 @@ function parseAwsConfig(text) {
 async function resolveAws($) {
   let home = ''
   let profile = ''
+  let source = 'env'
   try {
     home = (await $.env.get('HOME')) ?? ''
     profile = ((await $.env.get('AWS_PROFILE')) ?? '').trim()
@@ -165,6 +196,7 @@ async function resolveAws($) {
   if (!profile && projectRoot) {
     try {
       profile = String(await $.fs.read(projectRoot + '/.aws-profile')).split('\n')[0].trim()
+      source = 'file'
     } catch {}
   }
   let sections = {}
@@ -176,10 +208,14 @@ async function resolveAws($) {
     .filter((n) => AWS_PROFILE_RE.test(n))
   if (!profile) {
     const names = Object.keys(sections).filter((n) => n.startsWith('profile '))
-    if (names.length === 1) profile = names[0].slice('profile '.length).trim()
+    if (names.length === 1) {
+      profile = names[0].slice('profile '.length).trim()
+      source = 'only'
+    }
   }
   // the name ends up in a command line: only plain profile-name characters, never an option
   if (!AWS_PROFILE_RE.test(profile)) profile = ''
+  awsSource = profile ? source : 'env'
   const section = sections[profile === 'default' ? 'default' : 'profile ' + profile]
   if (profile !== aws.profile) {
     // a different profile: forget what we knew and check again soon
@@ -418,20 +454,34 @@ async function discoverKubeconfigs($) {
 
 // `export NAME='value'; ` for each picked variable. Values are quoted, so a path with a space
 // or a quote in it stays one word.
-function pickedPrefix() {
-  return Object.entries(picked)
+function exportPrefix(vars) {
+  return Object.entries(vars)
     .map(([k, v]) => 'export ' + k + "='" + String(v).replace(/'/g, "'\\''") + "'; ")
     .join('')
+}
+
+async function getPicked($) {
+  try {
+    return (await $.state.get(PICKED_REF)).value ?? {}
+  } catch {
+    return {}
+  }
+}
+
+// What Claude's shell must be given so it matches the panel: everything picked, plus the AWS
+// profile on show when it did not come from AWS_PROFILE (.aws-profile, or the only profile).
+async function shellExports($) {
+  return { ...(aws.profile && awsSource !== 'env' ? { AWS_PROFILE: aws.profile } : {}), ...(await getPicked($)) }
 }
 
 // Only values the dropdown offered are accepted, never free text.
 async function switchAws($, name) {
   // "already selected" only counts once it has been exported: a profile the panel shows because
   // it is the only one in ~/.aws/config is not set in Claude's shell until it is picked.
-  if (!awsProfiles.includes(name) || (name === aws.profile && picked.AWS_PROFILE === name)) return
+  if (!awsProfiles.includes(name) || (name === aws.profile && (await getPicked($)).AWS_PROFILE === name)) return
   const r = await $.env.set('AWS_PROFILE', name)
   if (r?.deny) return $.ui.toast('Could not switch AWS profile: ' + r.deny)
-  picked.AWS_PROFILE = name
+  await update($, pickedAtom, (p) => ({ ...p, AWS_PROFILE: name }))
   await resolveAws($) // reads the new AWS_PROFILE and resets what we knew about the old one
   $.ui.toast('AWS profile is now ' + name + ' (commands Claude runs from now on)')
   checkAws($, true).catch(() => {})
@@ -444,7 +494,7 @@ async function switchKubeconfig($, path) {
   // an approve-all given for the old cluster must not carry over to the new one
   const wasArmed = approveAll
   if (wasArmed) await setApprove($, false)
-  picked.KUBECONFIG = path
+  await update($, pickedAtom, (p) => ({ ...p, KUBECONFIG: path }))
   kubeconfig = path
   await refreshCluster($) // re-judges prod / non-prod for the new file
   $.ui.toast('Kubeconfig is now ' + path.split('/').pop() + (wasArmed ? '; approve-all switched off' : ''))
@@ -653,7 +703,7 @@ async function redactResult($, command, result) {
 
 function describeVerdict(verdict, command) {
   const where = cluster.known
-    ? cluster.name + (cluster.namespace ? ' / ' + cluster.namespace : '') + (cluster.isProd ? ' (PROD)' : '')
+    ? cluster.name + (cluster.namespace ? ' / ' + cluster.namespace : '') + (cluster.isProd ? ' (' + levelLabel() + ')' : '')
     : 'unknown cluster'
   const why = verdict.retarget
     ? 'This command sets its own cluster/context, so the panel may not show where it lands.'
@@ -878,7 +928,7 @@ export function register(on) {
       text:
         (cluster.known ? cluster.name : 'no cluster found') +
         ' | project: ' + (cluster.namespace || 'default') +
-        ' | prod: ' + cluster.isProd +
+        ' | prod: ' + cluster.isProd + ' (' + levelLabel() + ')' +
         ' | approve-all: ' + (await approveActive($)) +
         ' | aws: ' + (aws.profile ? aws.profile + ' (' + aws.status + ')' : 'no profile'),
     }
@@ -904,7 +954,7 @@ export function register(on) {
   on('command.run', { command: 'kube-login' }, async ($, e) => {
     await loginKube($, String(e.args ?? '').trim())
     await refreshCluster($)
-    return { text: (cluster.known ? cluster.name + (cluster.isProd ? ' (PROD)' : ' (non-prod)') : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
+    return { text: (cluster.known ? cluster.name + ' (' + levelLabel() + ')' : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
   })
 
   on('command.run', { command: 'audit' }, async ($) => {
@@ -932,7 +982,7 @@ export function register(on) {
     const verdict = classify(e.command)
     // what the shell actually runs: the picked AWS profile / kubeconfig first, then the command.
     // The checks below look at the original command, so they are not fooled by the prefix.
-    const prefix = pickedPrefix()
+    const prefix = exportPrefix(await shellExports($))
     const go = (ev) => next(prefix ? { ...ev, command: prefix + ev.command } : ev)
     if (!verdict.touches) return go(e)
 
@@ -1024,8 +1074,15 @@ export function register(on) {
       kubeLogin = { status: 'logging', last: null }
       $.ui.invalidate('ui.render')
     }
-    const level = !cluster.known ? THEME.danger : cluster.isProd ? THEME.danger : THEME.ok
-    const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
+    const level = cluster.level === 'nonprod' ? THEME.ok : cluster.level === 'unlisted' ? THEME.warn : THEME.danger
+    const badge =
+      cluster.level === 'strict'
+        ? chip('STRICT', THEME.danger)
+        : cluster.level === 'prod'
+          ? chip('PROD', THEME.danger)
+          : cluster.level === 'unlisted'
+            ? chip('UNLISTED', THEME.warn)
+            : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
       [field('project', cluster.namespace || 'default', THEME.text)],
       ...(kubeconfigs.length > 0
@@ -1221,7 +1278,9 @@ export function register(on) {
             children: [
               armed
                 ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
-                : cluster.isProd
+                : cluster.level === 'unlisted'
+                  ? 'Name not in NONPROD_PATTERNS, so treated as prod: asking before every cluster-changing command.'
+                  : cluster.isProd
                   ? 'Asking before every cluster-changing command.'
                   : 'Non-prod: only commands that set their own target are asked.',
             ],

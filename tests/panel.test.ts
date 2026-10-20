@@ -252,6 +252,82 @@ function switchWorld(on: any, env: Record<string, string>) {
   )
 }
 
+test('the cluster badge tells prod, non-prod and unlisted apart', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/finance-east.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('process.run', (_$: any, e: any) =>
+    e.argv[0] === 'oc'
+      ? { value: { exitCode: 0, stdout: KUBECONFIG_JSON, stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } },
+  )
+  const badge = async (kubeconfig: string) => {
+    env.KUBECONFIG = kubeconfig
+    await $.command.run({ command: 'ctx', args: '' })
+    const ui = await mount($, 'terminal')
+    const text = JSON.stringify(await ui.find({ type: 'Text', text: /PROD|UNLISTED|non-prod|STRICT/ }))
+    await ui.unmount()
+    return text
+  }
+  expect(await badge('/k/finance-east.kubeconfig')).toContain('UNLISTED')
+  expect(await badge('/k/prod-east.kubeconfig')).toContain('PROD')
+  expect(await badge('/k/sandbox-1.kubeconfig')).toContain('non-prod')
+})
+
+// The panel shows a profile from .aws-profile or the only one in ~/.aws/config, which Claude's
+// shell does not have: the guard must export it, or the card says "signed in" for a profile the
+// commands never use. A profile from AWS_PROFILE itself needs nothing.
+function profileSourceWorld(on: any, env: Record<string, string>, files: Record<string, string>) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.read', (_$: any, e: any) => {
+    if (!(e.path in files)) throw new Error('ENOENT')
+    return { value: files[e.path] }
+  })
+  on('fs.list', () => ({ value: [] }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '' } }))
+  const ran: string[] = []
+  on('tool.call', { tool: 'Bash' } as any, (_$: any, e: any) => {
+    ran.push(e.command)
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  return ran
+}
+
+test('a profile read from .aws-profile or the only profile is exported to the shell; one from AWS_PROFILE is not', async ($, on) => {
+  const ran = profileSourceWorld(
+    on,
+    { AWS_PROFILE: '', KUBECONFIG: '', HOME: '/home/t' },
+    { '/work/my-repo/.aws-profile': 'dev\n', '/home/t/.aws/config': '[profile dev]\nregion = x\n[profile prod]\nregion = y\n' },
+  )
+  await $.command.run({ command: 'todo', args: 'add x' }) // loads the project root, as session start does
+  await $.command.run({ command: 'ctx', args: '' })
+  await $.tool.call({ tool: 'Bash', command: 'aws sts get-caller-identity' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='dev'; aws sts get-caller-identity")
+})
+
+test('the only profile in ~/.aws/config is exported to the shell too', async ($, on) => {
+  const ran = profileSourceWorld(on, { AWS_PROFILE: '', KUBECONFIG: '', HOME: '/home/t' }, { '/home/t/.aws/config': '[profile solo]\nregion = x\n' })
+  await $.command.run({ command: 'ctx', args: '' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='solo'; ls")
+})
+
+test('a profile that comes from AWS_PROFILE itself is left alone', async ($, on) => {
+  const ran = profileSourceWorld(on, { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }, { '/home/t/.aws/config': '[profile dev]\nregion = x\n[profile prod]\nregion = y\n' })
+  await $.command.run({ command: 'ctx', args: '' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  expect(ran.at(-1)).toBe('ls')
+})
+
 test('AWS dropdown: lists the profiles, and a pick sets AWS_PROFILE and re-checks', async ($, on) => {
   const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }
   switchWorld(on, env)
