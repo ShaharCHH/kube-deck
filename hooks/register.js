@@ -1,6 +1,6 @@
 import { atom, update } from 'claude-code'
 import { classify } from './classify.js'
-import { redactOutput } from './redact.js'
+import { maskCommand, redactOutput } from './redact.js'
 
 // What was picked in the panel (AWS_PROFILE, KUBECONFIG), kept in $.state: a hot reload resets
 // module variables but not this, and the process environment keeps the pick after a reload while
@@ -607,12 +607,6 @@ function formatTodos() {
 }
 
 // ---- activity feed and audit log
-function maskCommand(command) {
-  return command
-    .replace(/(--(?:token|password|client-secret)(?:=|\s+))\S+/gi, '$1***')
-    .replace(/(sha256~)\S+/g, '$1***')
-}
-
 function record(at, command, outcome) {
   const cmd = maskCommand(command).replace(/\s+/g, ' ').trim()
   activity = [

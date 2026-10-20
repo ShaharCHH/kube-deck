@@ -5,6 +5,41 @@
 
 export const MASK = '<redacted>'
 
+// ---- command lines
+// A command line shown on screen (the recent-commands card) or written to the audit log must not
+// carry the secrets typed into it. This only changes the copy that is shown or logged; the command
+// itself runs as written. Best effort, like everything here: it knows the usual shapes below.
+const VALUE = String.raw`(?:"[^"]*"|'[^']*'|\S+)` // one argument, quoted or not
+const CRED_WORD = String.raw`(?:token|password|passwd|secret|api-?key|access-?key|private-?key|credentials?)`
+const SECRET_FLAG = new RegExp(String.raw`(--[a-z0-9-]*${CRED_WORD}[a-z0-9-]*(?:=|\s+))${VALUE}`, 'gi')
+const SECRET_ENV = new RegExp(String.raw`((?:^|[\s;&|(])[A-Za-z0-9_]*${CRED_WORD.replace(/-\?/g, '_?')}[A-Za-z0-9_]*=)${VALUE}`, 'gi')
+const LOGIN_P = new RegExp(String.raw`(\s-p(?:=|\s+))${VALUE}`, 'g')
+const FROM_LITERAL = new RegExp(String.raw`(--from-literal(?:=|\s+)['"]?[^=\s'"]+=)${VALUE}`, 'g')
+const HELM_SET = new RegExp(String.raw`(--set(?:-string|-literal)?(?:=|\s+)['"]?[^=\s'"]*${CRED_WORD}[^=\s'"]*=)${VALUE}`, 'gi')
+const AUTH_HEADER = /((?:Authorization:\s*)?\b(?:Bearer|Basic)\s+)[^\s"']+/gi
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+(@)/gi
+// credentials that look like themselves wherever they appear
+const TOKEN_FORMATS = [
+  [/(sha256~)\S+/g, '$1***'],
+  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '***'],
+  [/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]*/g, '***'],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '***'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '***'],
+]
+
+export function maskCommand(command) {
+  let s = String(command ?? '')
+  s = s.replace(SECRET_FLAG, '$1***') // --token x, --password=x, --docker-password x, --client-secret x
+  s = s.replace(FROM_LITERAL, '$1***') // oc create secret generic x --from-literal=key=value
+  s = s.replace(HELM_SET, '$1***') // helm --set db.password=value
+  s = s.replace(SECRET_ENV, '$1***') // AWS_SECRET_ACCESS_KEY=x oc ..., GITHUB_TOKEN=x
+  if (/\blogin\b/.test(s)) s = s.replace(LOGIN_P, '$1***') // oc login -u u -p password
+  s = s.replace(AUTH_HEADER, '$1***') // curl -H "Authorization: Bearer x"
+  s = s.replace(URL_PASSWORD, '$1***$2') // https://user:password@host
+  for (const [re, to] of TOKEN_FORMATS) s = s.replace(re, to)
+  return s
+}
+
 // Commands whose whole point is to print a credential.
 const TOKEN_COMMANDS = /\bwhoami\b[^|;&\n]*(\s-t\b|--show-token)|\bcreate\s+token\b|\bget-token\b|\bnew-token\b|\bsa\s+get-token\b/
 

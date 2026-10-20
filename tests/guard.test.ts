@@ -113,6 +113,19 @@ test('approve-all skips the question, then expires after 15 minutes', async ($, 
   expect(seen.audit.at(-1).outcome).toBe('approved')
 })
 
+test('secrets typed into a command are masked in the audit log, but the command runs as written', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/k/sandbox.kubeconfig' })
+  const cmd = 'oc create secret generic db --from-literal=password=hunter2 --from-literal=user=bob'
+  await $.tool.call({ tool: 'Bash', command: cmd } as any)
+  expect(seen.ran).toEqual([cmd]) // unchanged: only the log copy is masked
+  const logged = JSON.stringify(seen.audit.at(-1))
+  expect(logged).not.toContain('hunter2')
+  expect(logged).toContain('--from-literal=user=')
+
+  await $.tool.call({ tool: 'Bash', command: 'oc login -u admin -p s3cretpw https://api.x.example.com:6443' } as any)
+  expect(JSON.stringify(seen.audit.at(-1))).not.toContain('s3cretpw')
+})
+
 test('secret values never reach the model', async ($, on) => {
   world(on, { kubeconfig: '/k/sandbox.kubeconfig' })
   const r: any = await $.tool.call({ tool: 'Bash', command: 'oc get secret demo -o yaml' } as any)
