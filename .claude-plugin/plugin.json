@@ -1,7 +1,7 @@
 {
   "name": "kube-deck",
   "version": "0.1.0",
-  "description": "Cluster + project banner, approval prompt for cluster-changing commands on prod, approve-all switch, and a todo list",
+  "description": "Safety net and control panel for Kubernetes / OpenShift and AWS work: asks before cluster changes on prod, redacts secrets, audit log, profile and cluster switching and login, todo list",
   "author": { "name": "Shahar" },
   "types": "./types/index.d.ts"
 }

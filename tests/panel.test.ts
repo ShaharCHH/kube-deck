@@ -559,13 +559,13 @@ test('AWS SSO: a URL or region that is not plain writes nothing and runs nothing
 test('AWS SSO: the issuer URL works; text stuck on its end (a region) is refused; a clashing session is not reused', async ($, on) => {
   const { files, aws } = ssoWorld(on)
   // the issuer URL with the region glued on, as it happened once
-  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224il-central-1 il-central-1' })
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-0123456789abcdefil-central-1 il-central-1' })
   expect(aws.length).toBe(0)
   expect(files['/home/t/.aws/config']).toBe('[default]\nregion = us-east-1\n')
 
   // a session of that name already there with another URL: refused, nothing run
-  const good = 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224'
-  files['/home/t/.aws/config'] += '[sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224]\nsso_start_url = https://other.example.com/start\n'
+  const good = 'https://identitycenter.amazonaws.com/ssoins-0123456789abcdef'
+  files['/home/t/.aws/config'] += '[sso-session kube-deck-identitycenter-amazonaws-com-ssoins-0123456789abcdef]\nsso_start_url = https://other.example.com/start\n'
   await $.command.run({ command: 'aws-sso-login', args: good + ' il-central-1' })
   expect(aws.length).toBe(0)
   const ui = await mount($, 'terminal')
@@ -576,11 +576,11 @@ test('AWS SSO: the issuer URL works; text stuck on its end (a region) is refused
 test('AWS SSO: the issuer URL is accepted and logs in under its own session name', async ($, on) => {
   const { files, aws } = ssoWorld(on)
   files['/home/t/.aws/sso/cache/zzz.json'] = JSON.stringify({
-    startUrl: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224', accessToken: 'TOKEN9', expiresAt: '2099-01-01T00:00:00Z',
+    startUrl: 'https://identitycenter.amazonaws.com/ssoins-0123456789abcdef', accessToken: 'TOKEN9', expiresAt: '2099-01-01T00:00:00Z',
   })
-  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224 il-central-1' })
-  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224')).toBe(true)
-  expect(files['/home/t/.aws/config']).toContain('sso_start_url = https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224\n')
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-0123456789abcdef il-central-1' })
+  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-identitycenter-amazonaws-com-ssoins-0123456789abcdef')).toBe(true)
+  expect(files['/home/t/.aws/config']).toContain('sso_start_url = https://identitycenter.amazonaws.com/ssoins-0123456789abcdef\n')
 })
 
 test('AWS SSO: a login that leaves no token says so and adds no profile', async ($, on) => {
