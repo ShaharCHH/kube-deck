@@ -19,6 +19,9 @@ const KUBE_LOGIN_MS = 10 * 60000
 const KUBE_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/
 // SSO start URL and region typed in the panel; both end up in ~/.aws/config and on a command line.
 const AWS_SSO_URL_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(\/[A-Za-z0-9_.\/-]*)?$/
+// The Identity Center issuer URL is also accepted as a start URL; its id is exactly 16 hex digits,
+// so extra text stuck on the end (a region typed into the wrong field) is caught.
+const AWS_SSO_ISSUER_RE = /^https:\/\/identitycenter\.amazonaws\.com\/ssoins-[0-9a-f]{16}$/
 const AWS_REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/
 const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
@@ -303,8 +306,8 @@ async function loginAwsSso($, typedUrl, typedRegion) {
   let url = String(typedUrl || ssoUrlDraft || '').trim()
   if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
   const region = String(typedRegion || ssoRegionDraft || '').trim()
-  const bad = !AWS_SSO_URL_RE.test(url)
-    ? 'Not a usable SSO start URL. Type it like mycompany.awsapps.com/start (https only).'
+  const bad = !AWS_SSO_URL_RE.test(url) || (url.startsWith('https://identitycenter.amazonaws.com/') && !AWS_SSO_ISSUER_RE.test(url))
+    ? 'Not a usable SSO start URL. Use mycompany.awsapps.com/start, or the issuer URL identitycenter.amazonaws.com/ssoins-<16 hex digits> (nothing after it).'
     : !AWS_REGION_RE.test(region)
       ? 'Type the SSO region, like us-east-1 (where Identity Center lives).'
       : ''
@@ -319,7 +322,7 @@ async function loginAwsSso($, typedUrl, typedRegion) {
   } catch {}
   if (!home) return $.ui.toast('Cannot add a profile: HOME is not set')
 
-  const session = 'kube-deck-' + /^https:\/\/([^/]+)/.exec(url)[1].replace(/[^A-Za-z0-9]+/g, '-')
+  const session = 'kube-deck-' + url.slice('https://'.length).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
   awsSso = { status: 'logging', choices: [], session, region, last: null }
   $.ui.invalidate('ui.render')
   const started = await $.clock.now()
@@ -330,13 +333,18 @@ async function loginAwsSso($, typedUrl, typedRegion) {
     try {
       text = String(await $.fs.read(home + '/.aws/config'))
     } catch {}
-    if (!parseAwsConfig(text)['sso-session ' + session]) {
+    const existing = parseAwsConfig(text)['sso-session ' + session]
+    if (existing && String(existing.sso_start_url ?? '').replace(/[#/]+$/, '') !== url.replace(/[#/]+$/, '')) {
+      throw new Error('~/.aws/config already has [sso-session ' + session + '] with a different sso_start_url; fix or remove that block')
+    }
+    if (!existing) {
       await appendAwsConfig($, home, '[sso-session ' + session + ']\nsso_start_url = ' + url + '\nsso_region = ' + region + '\nsso_registration_scopes = sso:account:access\n')
     }
     const r = await $.process.run([AWS_CLI, 'sso', 'login', '--sso-session', session], { timeoutMs: AWS_LOGIN_MS })
     if (r.exitCode !== 0) {
-      const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
-      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+      // the AWS CLI often puts the reason on the line after "An error occurred (...):", so keep two lines
+      const lines = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join(' ')
+      note = 'exit ' + r.exitCode + (lines ? ': ' + lines.replace(/https?:\/\/\S+/g, '<url>').replace(/^aws: \[ERROR\]: /, '').slice(0, 220) : '')
     } else {
       const token = await findSsoToken($, home, url)
       if (!token) note = 'logged in, but no SSO token was found in ~/.aws/sso/cache'
@@ -344,7 +352,7 @@ async function loginAwsSso($, typedUrl, typedRegion) {
       if (!note && choices.length === 0) note = 'logged in, but no accounts or roles are available to you'
     }
   } catch (err) {
-    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 220)
   }
   const secs = Math.round(((await $.clock.now()) - started) / 1000)
   awsSso = { status: 'idle', choices, session, region, last: note ? { ok: false, secs, note } : { ok: true, secs, note: '' } }

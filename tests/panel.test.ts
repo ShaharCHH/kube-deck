@@ -444,10 +444,10 @@ test('AWS SSO: a start URL and region log in, list accounts, and the picked one 
 
   const cfg = files['/home/t/.aws/config']
   expect(cfg).toContain('[default]') // what was there is kept
-  expect(cfg).toContain('[sso-session kube-deck-mycompany-awsapps-com]')
+  expect(cfg).toContain('[sso-session kube-deck-mycompany-awsapps-com-start]')
   expect(cfg).toContain('sso_start_url = https://mycompany.awsapps.com/start')
   expect(files['/home/t/.aws/config.bak-kube-deck']).toBe('[default]\nregion = us-east-1\n') // one-time copy
-  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-mycompany-awsapps-com')).toBe(true)
+  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-mycompany-awsapps-com-start')).toBe(true)
   const listed = aws.find((a) => a[2] === 'list-accounts')!
   expect(listed).toContain('TOKEN123')
 
@@ -459,7 +459,7 @@ test('AWS SSO: a start URL and region log in, list accounts, and the picked one 
   await ui.select({ key: 'aws-sso-pick', value: '0' })
   const after = files['/home/t/.aws/config']
   expect(after).toContain('[profile Workload-Admin]')
-  expect(after).toContain('sso_session = kube-deck-mycompany-awsapps-com')
+  expect(after).toContain('sso_session = kube-deck-mycompany-awsapps-com-start')
   expect(after).toContain('sso_account_id = 111122223333')
   expect(after).toContain('sso_role_name = Admin')
   expect(env.AWS_PROFILE).toBe('Workload-Admin') // and the session now uses it
@@ -478,6 +478,33 @@ test('AWS SSO: a URL or region that is not plain writes nothing and runs nothing
   const ui = await mount($, 'terminal')
   expect(await ui.find({ type: 'Text', text: /Type the SSO region|Not a usable SSO start URL/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('AWS SSO: the issuer URL works; text stuck on its end (a region) is refused; a clashing session is not reused', async ($, on) => {
+  const { files, aws } = ssoWorld(on)
+  // the issuer URL with the region glued on, as it happened once
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224il-central-1 il-central-1' })
+  expect(aws.length).toBe(0)
+  expect(files['/home/t/.aws/config']).toBe('[default]\nregion = us-east-1\n')
+
+  // a session of that name already there with another URL: refused, nothing run
+  const good = 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224'
+  files['/home/t/.aws/config'] += '[sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224]\nsso_start_url = https://other.example.com/start\n'
+  await $.command.run({ command: 'aws-sso-login', args: good + ' il-central-1' })
+  expect(aws.length).toBe(0)
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /different sso_start_url/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('AWS SSO: the issuer URL is accepted and logs in under its own session name', async ($, on) => {
+  const { files, aws } = ssoWorld(on)
+  files['/home/t/.aws/sso/cache/zzz.json'] = JSON.stringify({
+    startUrl: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224', accessToken: 'TOKEN9', expiresAt: '2099-01-01T00:00:00Z',
+  })
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224 il-central-1' })
+  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224')).toBe(true)
+  expect(files['/home/t/.aws/config']).toContain('sso_start_url = https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224\n')
 })
 
 test('AWS SSO: a login that leaves no token says so and adds no profile', async ($, on) => {
