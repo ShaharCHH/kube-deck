@@ -30,6 +30,13 @@ const cases = [
   ['watch oc get pods', true, false, false],
   ['cd /tmp && oc scale deploy/x --replicas=0', true, true, false],
   ['oc get pods -n foo --server=https://other:6443', true, false, true],
+  // separators inside quotes: the split ignores quotes, but the result must stay safe
+  ['oc get cm x -o jsonpath="{.a};{.b}"', true, false, false],
+  ['oc delete pod "a;b"', true, true, false],
+  ['oc label pod x "k=a|b"', true, true, false],
+  ['oc get pods | grep "x|y"', true, false, false],
+  // known false positive: oc text inside a quoted echo is read as a command (an extra prompt)
+  ['echo "a; oc delete pod x"', true, true, false],
 ]
 
 let failed = 0

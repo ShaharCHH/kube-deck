@@ -5,3 +5,4 @@ node_modules/
 .kube-deck/
 tsconfig.json
 .claude-plugin/types/
+SESSION_STATE.md
