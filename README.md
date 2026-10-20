@@ -4,13 +4,14 @@ Claude Code mod (CLI + desktop). Needs Claude Code >= 2.1.287.
 
 ## What it does
 
-- **Right-hand panel (`/deck`):** four cards.
+- **Right-hand panel (`/deck`):** cards for cluster, AWS, guard, todo, done and cluster commands.
   - *Cluster:* name, project, a red `PROD` badge (green `non-prod`, `STRICT` when the cluster can't be read).
+  - *AWS:* profile, region, signed-in role and whether the login works (`signed in` / `SSO EXPIRED` / `unreachable`), with a `Recheck` button. Profile comes from `AWS_PROFILE`, then a `.aws-profile` file in the project root, then the only profile in `~/.aws/config`. The login is checked with `aws sts get-caller-identity` at most every 5 minutes, in the background. The account id is never shown.
   - *Guard:* `Approve all` button (hotkey `a`) with a countdown while on.
   - *Todo:* add field + `Add`, `☐`/`☑` per item, `x`, `Clear done`, `done/total` count.
   - *Cluster commands:* the last 8 cluster-changing commands with outcome.
 
-  Outside cluster work (no cluster readable, no cluster command run, approve-all off) only the Todo card shows, so the panel stays quiet in non-infra sessions.
+  Outside cluster work (no cluster readable, no cluster command run, approve-all off) only the Todo card (and Done, and AWS when a profile resolves) shows, so the panel stays quiet in non-infra sessions.
 
   It opens by itself, unfocused. Beside the transcript it needs a wide fullscreen terminal (>= 144 columns); otherwise it waits and `/deck` opens it above the prompt. `/deck close` closes it. Ctrl+X then Tab focuses it.
 - **Guard:** Bash commands that change cluster state (`oc`, `kubectl`, `helm`, `argocd`) ask first on prod. Read-only verbs pass. Unknown verbs count as changing. Commands that set their own target (`--context`, `--kubeconfig`, `--server`, `KUBECONFIG=`) are asked even on non-prod.
@@ -23,7 +24,7 @@ Claude Code mod (CLI + desktop). Needs Claude Code >= 2.1.287.
 - **Todo (per repo):** each project root has its own list, kept in `$.store` (shared by all sessions on the machine). `/todo add <text>` adds from the prompt.
 - **Claude adds todos on its own:** tool `mcp__kube-deck__todo` (list / add / done / update, no delete) plus a short static system-prompt section telling it to add concrete follow-ups without asking. Its items are tagged `· claude`, duplicates are skipped, you get a toast per change, you discard with `x`. It edits an item only after discussing it with you.
 - **Refresh:** cluster and project are re-read on every prompt (3s timeout), at session start, on `/ctx`, and around each cluster command.
-- `/ctx` prints cluster, project and guard state.
+- `/ctx` prints cluster, project, guard and AWS state.
 
 ## Run
 

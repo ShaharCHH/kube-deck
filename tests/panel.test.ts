@@ -91,3 +91,57 @@ test('finished tasks move to the Done card, which holds Clear done; open tasks a
     await ui.unmount()
   }
 })
+
+// The AWS card: profile from AWS_PROFILE, login state from `sts get-caller-identity`.
+function awsWorld(on: any, sts: { exitCode: number; stdout: string; stderr: string } | 'throw') {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  mock.env(on, { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.read', (_$: any, e: any) =>
+    String(e.path).endsWith('/.aws/config') ? { value: '[profile dev]\nregion = eu-west-1\n' } : { error: { kind: 'not_found' } },
+  )
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] === 'aws') return sts === 'throw' ? { error: { kind: 'failed' } } : { value: sts }
+    return { value: { exitCode: 1, stdout: '', stderr: 'oc: not found' } }
+  })
+}
+
+test('AWS card: signed in shows profile, region and role, never the account id', async ($, on) => {
+  awsWorld(on, {
+    exitCode: 0,
+    stdout: JSON.stringify({ Account: '123456789012', Arn: 'arn:aws:sts::123456789012:assumed-role/AdminRole/me' }),
+    stderr: '',
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount($, surface)
+    await ui.press({ key: 'aws-recheck' })
+    const tree = JSON.stringify(await ui.find({ type: 'Text', text: /signed in/ }))
+    expect(tree).toContain('signed in')
+    expect(await ui.find({ type: 'Text', text: /eu-west-1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /AdminRole/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /123456789012/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('AWS card: an expired login says so and shows the fix; a dead CLI is "unreachable", not healthy', async ($, on) => {
+  awsWorld(on, { exitCode: 255, stdout: '', stderr: 'Error loading SSO Token: Token has expired and refresh failed' })
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+  await ui.press({ key: 'aws-recheck' })
+  expect(await ui.find({ type: 'Text', text: /SSO EXPIRED/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /aws sso login --profile dev/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('AWS card: a CLI that fails for another reason reads as unreachable', async ($, on) => {
+  awsWorld(on, { exitCode: 1, stdout: '', stderr: 'Could not connect to the endpoint URL' })
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+  await ui.press({ key: 'aws-recheck' })
+  expect(await ui.find({ type: 'Text', text: /unreachable/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /signed in/ })).toBeUndefined()
+  await ui.unmount()
+})

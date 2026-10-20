@@ -7,6 +7,9 @@ import { redactOutput } from './redact.js'
 const PROD_PATTERNS = [/prod/i]
 // Used only to READ the local kubeconfig (`config view --minify`), never talks to a cluster.
 const KUBE_CLI = 'oc'
+// Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
+const AWS_CLI = 'aws'
+const AWS_CHECK_MS = 5 * 60000
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
 // Audit log: $HOME/<AUDIT_DIR>/audit.jsonl, one JSON line per cluster-changing command.
@@ -32,6 +35,9 @@ let cluster = { known: false, name: '', namespace: '', isProd: true }
 let approveAll = false
 let approveUntil = 0
 let todos = []
+// AWS profile (resolved like the old session bar did) and whether its login still works.
+// status: none (no profile) | unknown | checking | ok | expired | error
+let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0 }
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
 let todoKey = 'todos'
 let repoName = ''
@@ -87,6 +93,87 @@ async function refreshCluster($) {
   const isProd = !known || PROD_PATTERNS.some((re) => re.test(haystack))
 
   cluster = { known, name, namespace, isProd }
+  $.ui.invalidate('ui.render')
+}
+
+// ---- aws
+// Claude Code's environment is frozen at launch, so the profile is found in order, first hit
+// wins: AWS_PROFILE, a one-line `.aws-profile` file in the project root, or the only
+// `[profile X]` in ~/.aws/config.
+function parseAwsConfig(text) {
+  const sections = {}
+  let cur = null
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim()
+    const head = /^\[(.+)\]$/.exec(line)
+    if (head) {
+      cur = sections[head[1].trim()] = {}
+      continue
+    }
+    const kv = /^([^=#;\s][^=]*?)\s*=\s*(.*)$/.exec(line)
+    if (cur && kv) cur[kv[1]] = kv[2]
+  }
+  return sections
+}
+
+async function resolveAws($) {
+  let home = ''
+  let profile = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+    profile = ((await $.env.get('AWS_PROFILE')) ?? '').trim()
+  } catch {}
+  if (!profile && projectRoot) {
+    try {
+      profile = String(await $.fs.read(projectRoot + '/.aws-profile')).split('\n')[0].trim()
+    } catch {}
+  }
+  let sections = {}
+  try {
+    if (home) sections = parseAwsConfig(await $.fs.read(home + '/.aws/config'))
+  } catch {}
+  if (!profile) {
+    const names = Object.keys(sections).filter((n) => n.startsWith('profile '))
+    if (names.length === 1) profile = names[0].slice('profile '.length).trim()
+  }
+  const section = sections[profile === 'default' ? 'default' : 'profile ' + profile]
+  if (profile !== aws.profile) {
+    // a different profile: forget what we knew and check again soon
+    aws = { profile, region: '', role: '', status: profile ? 'unknown' : 'none', checkedAt: 0 }
+  }
+  aws.region = section?.region ?? ''
+  $.ui.invalidate('ui.render')
+}
+
+// Is the login for the profile still good? A real call, not a guess from the token file, so
+// "unreachable" (network, CLI failure) is kept apart from "expired" and never read as healthy.
+async function checkAws($, force) {
+  if (!aws.profile || aws.status === 'checking') return
+  const now = await $.clock.now()
+  if (!force && aws.checkedAt && now - aws.checkedAt < AWS_CHECK_MS) return
+  const profile = aws.profile
+  aws.status = 'checking'
+  $.ui.invalidate('ui.render')
+  let status = 'error'
+  let role = ''
+  try {
+    const r = await $.process.run([AWS_CLI, 'sts', 'get-caller-identity', '--profile', profile, '--output', 'json'], {
+      timeoutMs: 10000,
+    })
+    if (r.exitCode === 0) {
+      status = 'ok'
+      try {
+        // keep only the role or user name, never the account id inside the ARN
+        role = /:(?:assumed-role|user|role)\/([^/]+)/.exec(JSON.parse(r.stdout).Arn ?? '')?.[1] ?? ''
+      } catch {}
+    } else if (/expired|sso|token|login/i.test(String(r.stderr ?? ''))) {
+      status = 'expired'
+    }
+  } catch {}
+  if (aws.profile !== profile) return // switched while we waited; the new profile gets its own check
+  aws.status = status
+  aws.role = role
+  aws.checkedAt = await $.clock.now()
   $.ui.invalidate('ui.render')
 }
 
@@ -301,6 +388,7 @@ export function register(on) {
     })
     await loadTodos($)
     await refreshCluster($)
+    await resolveAws($)
     // Count down approve-all and switch it off when time is up. Runs once a second but only
     // does anything while approve-all is on. (The timer stops when the module reloads.)
     $.clock.every(1000, async () => {
@@ -311,6 +399,10 @@ export function register(on) {
         }
       } catch {}
     })
+    // The AWS login check runs in the background so it never delays a prompt: once soon after
+    // start, then whenever the last check is older than AWS_CHECK_MS.
+    $.clock.after(1000, () => checkAws($, false).catch(() => {}))
+    $.clock.every(30000, () => checkAws($, false).catch(() => {}))
     // Open the panel unfocused. In a narrow terminal it waits (isPlaced false); /deck opens it.
     try {
       await $.ui.open({ id: PANE, title: 'kube-deck', columns: PANE_COLUMNS })
@@ -324,6 +416,7 @@ export function register(on) {
     try {
       await loadTodos($)
       await refreshCluster($)
+      await resolveAws($)
     } catch {}
     return next(e)
   })
@@ -424,12 +517,14 @@ export function register(on) {
 
   on('command.run', { command: 'ctx' }, async ($) => {
     await refreshCluster($)
+    await resolveAws($)
     return {
       text:
         (cluster.known ? cluster.name : 'no cluster found') +
         ' | project: ' + (cluster.namespace || 'default') +
         ' | prod: ' + cluster.isProd +
-        ' | approve-all: ' + (await approveActive($)),
+        ' | approve-all: ' + (await approveActive($)) +
+        ' | aws: ' + (aws.profile ? aws.profile + ' (' + aws.status + ')' : 'no profile'),
     }
   })
 
@@ -544,6 +639,38 @@ export function register(on) {
     const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
       [field('project', cluster.namespace || 'default', THEME.text)],
+    ])
+
+    // ---- aws: profile, region, signed-in role, and whether the login still works
+    const AWS_BADGE = {
+      ok: chip('signed in', THEME.ok),
+      expired: chip('SSO EXPIRED', THEME.danger),
+      error: chip('unreachable', THEME.warn),
+      checking: Text({ color: THEME.muted, children: ['… checking'] }),
+      unknown: Text({ color: THEME.muted, children: ['… not checked'] }),
+    }
+    const awsColor = aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
+    const awsCard = card('AWS', AWS_BADGE[aws.status], awsColor, [
+      [
+        field('profile', aws.profile, THEME.text),
+        ...(aws.region ? [field('region', aws.region, THEME.text)] : []),
+        ...(aws.role ? [field('role', aws.role, THEME.text)] : []),
+        ...(aws.checkedAt ? [field('checked', hhmm(aws.checkedAt), THEME.muted)] : []),
+      ],
+      ...(aws.status === 'expired'
+        ? [[Text({ color: THEME.danger, wrap: 'wrap', children: ['Log in again in a terminal: aws sso login --profile ' + aws.profile] })]]
+        : aws.status === 'error'
+          ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Could not reach AWS (network, or the CLI failed). Login state is unknown.'] })]]
+          : []),
+      [
+        Button({
+          key: 'aws-recheck',
+          label: '↻  Recheck',
+          variant: 'secondary',
+          hover: { scope: 'hv-aws', color: THEME.onColor, backgroundColor: THEME.accent },
+          onPress: () => checkAws($, true),
+        }),
+      ],
     ])
 
     // ---- guard
@@ -731,15 +858,19 @@ export function register(on) {
     const footer = Text({ color: THEME.muted, children: ['/deck close  ·  ctrl+x tab focuses'] })
 
     // Outside cluster work only the todo card shows. The cluster cards appear once a cluster
-    // is detected, a cluster command has run, or approve-all is on. The guard itself never
-    // depends on what is drawn: it acts on every cluster command either way.
+    // is detected, a cluster command has run, or approve-all is on; the AWS card whenever a
+    // profile resolves. The guard itself never depends on what is drawn: it acts on every
+    // cluster command either way.
     const showCluster = cluster.known || activity.length > 0 || armed
     return Box({
       flexDirection: 'column',
       gap: 1,
       children: [
         Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
-        ...(showCluster ? [clusterCard, guardCard, todoCard] : [todoCard]),
+        ...(showCluster ? [clusterCard] : []),
+        ...(aws.profile ? [awsCard] : []),
+        ...(showCluster ? [guardCard] : []),
+        todoCard,
         ...(doneCard ? [doneCard] : []),
         ...(showCluster ? [activityCard] : []),
         footer,
