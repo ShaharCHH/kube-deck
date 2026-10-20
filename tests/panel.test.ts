@@ -63,3 +63,31 @@ test('without a cluster: only the todo card draws', async ($, on) => {
     await ui.unmount()
   }
 })
+
+test('finished tasks move to the Done card, which holds Clear done; open tasks are divided', async ($, on) => {
+  setup(on, false)
+  await $.command.run({ command: 'ctx', args: '' })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount($, surface)
+    await ui.input({ key: 'new-todo', text: 'first' })
+    await ui.input({ key: 'new-todo', text: 'second' })
+
+    // nothing finished yet: no Done card, no Clear button; two open tasks have a divider between
+    expect(await ui.find({ key: 'clear-done' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^─+$/ })).toBeDefined()
+
+    // tick one: Clear done appears, and it is the only task left in Todo
+    const box = (await ui.find({ type: 'Button', text: /☐/ })) as any
+    await ui.press({ key: box.key })
+    expect(await ui.find({ key: 'clear-done' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Done$/ })).toBeDefined()
+
+    await ui.press({ key: 'clear-done' })
+    expect(await ui.find({ key: 'clear-done' })).toBeUndefined()
+    // clean up the remaining task so the next surface starts empty
+    const rest = (await ui.find({ type: 'Button', text: /✕/ })) as any
+    await ui.press({ key: rest.key })
+    await ui.unmount()
+  }
+})

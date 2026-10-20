@@ -581,15 +581,64 @@ export function register(on) {
       ],
     )
 
-    // ---- todos
-    const doneCount = todos.filter((t) => t.done).length
-    const bar = todos.length === 0 ? '' : '▰'.repeat(doneCount) + '▱'.repeat(todos.length - doneCount) + ' '
+    // ---- todos: open tasks in the Todo card, finished ones in the Done card
+    const open = todos.filter((t) => !t.done)
+    const finished = todos.filter((t) => t.done)
+    const doneCount = finished.length
+    const bar = todos.length === 0 ? '' : '▰'.repeat(doneCount) + '▱'.repeat(open.length) + ' '
     const addTodo = async (value) => {
       const text = String(value ?? '').trim()
       if (!text) return
       draft = ''
       await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
     }
+    // A thin line between two tasks
+    const divider = (id) =>
+      Text({ key: 'sep-' + id, color: THEME.muted, dimColor: true, wrap: 'truncate', children: ['─'.repeat(PANE_COLUMNS)] })
+    // One task row. No native checkbox element: a plain button that flips between two glyphs.
+    const taskRow = (t) =>
+      Box({
+        flexDirection: 'column',
+        children: [
+          Box({
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Button({
+                key: 'done-' + t.id,
+                label: t.done ? '☑' : '☐',
+                plain: true,
+                onPress: () =>
+                  mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
+              }),
+              Box({
+                flexGrow: 1,
+                children: [
+                  Text({
+                    color: t.done ? THEME.muted : THEME.text,
+                    strikethrough: t.done,
+                    wrap: 'wrap',
+                    children: [t.text],
+                  }),
+                ],
+              }),
+              Button({
+                key: 'del-' + t.id,
+                label: '✕',
+                plain: true,
+                hover: { scope: 'hv-del-' + t.id, color: THEME.danger },
+                onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
+              }),
+            ],
+          }),
+          ...(t.by === 'claude'
+            ? [Box({ paddingLeft: 3, children: [Text({ color: THEME.brand, dimColor: true, children: ['✦ added by Claude'] })] })]
+            : []),
+        ],
+      })
+    // rows with a divider between each pair
+    const withDividers = (list) => list.flatMap((t, i) => (i === 0 ? [taskRow(t)] : [divider(t.id), taskRow(t)]))
+
     const todoCard = card(
       'Todo' + (repoName ? ' · ' + repoName : ''),
       Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [bar + doneCount + '/' + todos.length] }),
@@ -621,52 +670,28 @@ export function register(on) {
             ],
           }),
         ],
-        todos.length === 0
-          ? [Text({ color: THEME.muted, italic: true, children: ['Nothing yet. Add a task above, or ask Claude to.'] })]
-          : todos.map((t) =>
-              Box({
-                flexDirection: 'column',
-                children: [
-                  Box({
-                    flexDirection: 'row',
-                    columnGap: 1,
-                    children: [
-                      // No native checkbox element: a plain button that flips between two glyphs.
-                      Button({
-                        key: 'done-' + t.id,
-                        label: t.done ? '☑' : '☐',
-                        plain: true,
-                        onPress: () =>
-                          mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
-                      }),
-                      Box({
-                        flexGrow: 1,
-                        children: [
-                          Text({
-                            color: t.done ? THEME.muted : THEME.text,
-                            strikethrough: t.done,
-                            wrap: 'wrap',
-                            children: [t.text],
-                          }),
-                        ],
-                      }),
-                      Button({
-                        key: 'del-' + t.id,
-                        label: '✕',
-                        plain: true,
-                        hover: { scope: 'hv-del-' + t.id, color: THEME.danger },
-                        onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
-                      }),
-                    ],
-                  }),
-                  ...(t.by === 'claude'
-                    ? [Box({ paddingLeft: 3, children: [Text({ color: THEME.brand, dimColor: true, children: ['✦ added by Claude'] })] })]
-                    : []),
-                ],
-              }),
-            ),
-        ...(doneCount > 0
+        open.length === 0
           ? [
+              Text({
+                color: THEME.muted,
+                italic: true,
+                children: [doneCount > 0 ? 'All caught up.' : 'Nothing yet. Add a task above, or ask Claude to.'],
+              }),
+            ]
+          : withDividers(open),
+      ],
+    )
+
+    // The Done card holds finished tasks and the Clear button. It only shows when there is something in it.
+    const doneCard =
+      doneCount === 0
+        ? null
+        : card(
+            'Done',
+            Text({ color: THEME.ok, children: [doneCount + ' finished'] }),
+            THEME.ok,
+            [
+              withDividers(finished),
               [
                 Button({
                   key: 'clear-done',
@@ -676,10 +701,8 @@ export function register(on) {
                   onPress: () => mutateTodos($, (list) => list.filter((x) => !x.done)),
                 }),
               ],
-            ]
-          : []),
-      ],
-    )
+            ],
+          )
 
     // ---- recent cluster commands: one line each, time + outcome chip + the command
     const OUTCOME = {
@@ -716,7 +739,9 @@ export function register(on) {
       gap: 1,
       children: [
         Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
-        ...(showCluster ? [clusterCard, guardCard, todoCard, activityCard] : [todoCard]),
+        ...(showCluster ? [clusterCard, guardCard, todoCard] : [todoCard]),
+        ...(doneCard ? [doneCard] : []),
+        ...(showCluster ? [activityCard] : []),
         footer,
       ],
     })
