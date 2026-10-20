@@ -7,10 +7,30 @@ import { redactOutput } from './redact.js'
 const PROD_PATTERNS = [/prod/i]
 // Used only to READ the local kubeconfig (`config view --minify`), never talks to a cluster.
 const KUBE_CLI = 'oc'
+// Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
+const AWS_CLI = 'aws'
+const AWS_CHECK_MS = 5 * 60000
+// How long `aws sso login` may wait for you to approve in the browser (10 minutes is the most
+// $.process.run allows). Killing it earlier leaves the browser's redirect with nothing to connect to.
+const AWS_LOGIN_MS = 10 * 60000
+const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
 // Audit log: $HOME/<AUDIT_DIR>/audit.jsonl, one JSON line per cluster-changing command.
 const AUDIT_DIR = '.kube-deck'
+
+// Panel colors. Theme keys, not hex: they follow the person's light/dark theme. Change a
+// value here to restyle the whole panel (any theme key, or a color string).
+const THEME = {
+  brand: 'claude', // title, todo card
+  accent: 'suggestion', // guard card, primary actions
+  ok: 'success', // non-prod, approved, all done
+  warn: 'warning', // approve-all ON
+  danger: 'error', // PROD, refused, delete
+  muted: 'subtle', // secondary text, borders
+  text: 'text',
+  onColor: 'inverseText', // text drawn on a filled chip or hovered button
+}
 
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
@@ -19,6 +39,12 @@ let cluster = { known: false, name: '', namespace: '', isProd: true }
 let approveAll = false
 let approveUntil = 0
 let todos = []
+// AWS profile (resolved like the old session bar did) and whether its login still works.
+// status: none (no profile) | unknown | checking | logging | ok | expired | error
+// lastLogin: how the last Log in attempt ended ({ ok, secs, note }), kept so a failure explains itself.
+let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0, lastLogin: null }
+// Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
+let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
 let todoKey = 'todos'
 let repoName = ''
@@ -75,6 +101,118 @@ async function refreshCluster($) {
 
   cluster = { known, name, namespace, isProd }
   $.ui.invalidate('ui.render')
+}
+
+// ---- aws
+// Claude Code's environment is frozen at launch, so the profile is found in order, first hit
+// wins: AWS_PROFILE, a one-line `.aws-profile` file in the project root, or the only
+// `[profile X]` in ~/.aws/config.
+function parseAwsConfig(text) {
+  const sections = {}
+  let cur = null
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim()
+    const head = /^\[(.+)\]$/.exec(line)
+    if (head) {
+      cur = sections[head[1].trim()] = {}
+      continue
+    }
+    const kv = /^([^=#;\s][^=]*?)\s*=\s*(.*)$/.exec(line)
+    if (cur && kv) cur[kv[1]] = kv[2]
+  }
+  return sections
+}
+
+async function resolveAws($) {
+  let home = ''
+  let profile = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+    profile = ((await $.env.get('AWS_PROFILE')) ?? '').trim()
+  } catch {}
+  if (!profile && projectRoot) {
+    try {
+      profile = String(await $.fs.read(projectRoot + '/.aws-profile')).split('\n')[0].trim()
+    } catch {}
+  }
+  let sections = {}
+  try {
+    if (home) sections = parseAwsConfig(await $.fs.read(home + '/.aws/config'))
+  } catch {}
+  if (!profile) {
+    const names = Object.keys(sections).filter((n) => n.startsWith('profile '))
+    if (names.length === 1) profile = names[0].slice('profile '.length).trim()
+  }
+  // the name ends up in a command line: only plain profile-name characters, never an option
+  if (!AWS_PROFILE_RE.test(profile)) profile = ''
+  const section = sections[profile === 'default' ? 'default' : 'profile ' + profile]
+  if (profile !== aws.profile) {
+    // a different profile: forget what we knew and check again soon
+    aws = { profile, region: '', role: '', status: profile ? 'unknown' : 'none', checkedAt: 0, lastLogin: null }
+  }
+  aws.region = section?.region ?? ''
+  $.ui.invalidate('ui.render')
+}
+
+// Is the login for the profile still good? A real call, not a guess from the token file, so
+// "unreachable" (network, CLI failure) is kept apart from "expired" and never read as healthy.
+async function checkAws($, force) {
+  if (!aws.profile || aws.status === 'checking' || aws.status === 'logging') return
+  const now = await $.clock.now()
+  if (!force && aws.checkedAt && now - aws.checkedAt < AWS_CHECK_MS) return
+  const profile = aws.profile
+  aws.status = 'checking'
+  $.ui.invalidate('ui.render')
+  let status = 'error'
+  let role = ''
+  try {
+    const r = await $.process.run([AWS_CLI, 'sts', 'get-caller-identity', '--profile', profile, '--output', 'json'], {
+      timeoutMs: 10000,
+    })
+    if (r.exitCode === 0) {
+      status = 'ok'
+      try {
+        // keep only the role or user name, never the account id inside the ARN
+        role = /:(?:assumed-role|user|role)\/([^/]+)/.exec(JSON.parse(r.stdout).Arn ?? '')?.[1] ?? ''
+      } catch {}
+    } else if (/expired|sso|token|login/i.test(String(r.stderr ?? ''))) {
+      status = 'expired'
+    }
+  } catch {}
+  if (aws.profile !== profile) return // switched while we waited; the new profile gets its own check
+  aws.status = status
+  aws.role = role
+  aws.checkedAt = await $.clock.now()
+  $.ui.invalidate('ui.render')
+}
+
+// Runs `aws sso login` (opens the browser, waits for you to approve), then checks the result.
+// Started by the Log in button; this is the one place the panel runs a login for you.
+async function loginAws($) {
+  const profile = aws.profile
+  if (!profile) return
+  aws.status = 'logging'
+  $.ui.invalidate('ui.render')
+  const started = await $.clock.now()
+  let ok = false
+  let note = ''
+  try {
+    const r = await $.process.run([AWS_CLI, 'sso', 'login', '--profile', profile], { timeoutMs: AWS_LOGIN_MS })
+    ok = r.exitCode === 0
+    if (!ok) {
+      // first line of what the CLI said, with any URL (it can carry a one-time code) dropped
+      const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+    }
+  } catch (err) {
+    // rejects when it cannot start, or was still running at the timeout
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+  }
+  const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  aws.lastLogin = { ok, secs, note }
+  $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
+  aws.status = 'unknown'
+  await checkAws($, true) // ask AWS, rather than trust the exit code
 }
 
 // ---- approve-all with an expiry
@@ -261,6 +399,11 @@ export function register(on) {
       immediate: true,
     })
     await $.command.register({
+      name: 'aws-login',
+      description: 'Run aws sso login for the panel\'s AWS profile (opens the browser)',
+      immediate: true,
+    })
+    await $.command.register({
       name: 'audit',
       description: 'Show the audit log path and its last 10 entries',
       immediate: true,
@@ -288,6 +431,7 @@ export function register(on) {
     })
     await loadTodos($)
     await refreshCluster($)
+    await resolveAws($)
     // Count down approve-all and switch it off when time is up. Runs once a second but only
     // does anything while approve-all is on. (The timer stops when the module reloads.)
     $.clock.every(1000, async () => {
@@ -296,8 +440,16 @@ export function register(on) {
           await approveActive($)
           $.ui.invalidate('ui.render')
         }
+        if (awsLoginWanted) {
+          awsLoginWanted = false
+          await loginAws($)
+        }
       } catch {}
     })
+    // The AWS login check runs in the background so it never delays a prompt: once soon after
+    // start, then whenever the last check is older than AWS_CHECK_MS.
+    $.clock.after(1000, () => checkAws($, false).catch(() => {}))
+    $.clock.every(30000, () => checkAws($, false).catch(() => {}))
     // Open the panel unfocused. In a narrow terminal it waits (isPlaced false); /deck opens it.
     try {
       await $.ui.open({ id: PANE, title: 'kube-deck', columns: PANE_COLUMNS })
@@ -311,6 +463,7 @@ export function register(on) {
     try {
       await loadTodos($)
       await refreshCluster($)
+      await resolveAws($)
     } catch {}
     return next(e)
   })
@@ -411,13 +564,22 @@ export function register(on) {
 
   on('command.run', { command: 'ctx' }, async ($) => {
     await refreshCluster($)
+    await resolveAws($)
     return {
       text:
         (cluster.known ? cluster.name : 'no cluster found') +
         ' | project: ' + (cluster.namespace || 'default') +
         ' | prod: ' + cluster.isProd +
-        ' | approve-all: ' + (await approveActive($)),
+        ' | approve-all: ' + (await approveActive($)) +
+        ' | aws: ' + (aws.profile ? aws.profile + ' (' + aws.status + ')' : 'no profile'),
     }
+  })
+
+  on('command.run', { command: 'aws-login' }, async ($) => {
+    await resolveAws($)
+    if (!aws.profile) return { text: 'no AWS profile found (set AWS_PROFILE, or put one in .aws-profile)' }
+    await loginAws($)
+    return { text: 'aws: ' + aws.profile + ' (' + aws.status + ')' }
   })
 
   on('command.run', { command: 'audit' }, async ($) => {
@@ -482,7 +644,8 @@ export function register(on) {
       : 'The kube-deck guard failed (' + next.error.kind + '), so this command was not run. Tell the user.',
   }))
 
-  // ---- the panel: cluster, guard, todos, recent cluster commands, as bordered cards
+  // ---- the panel: cluster, guard, todos, recent cluster commands, as bordered cards.
+  // Colors are theme keys (THEME, top of file), so the panel follows light/dark mode.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const { Box, Text, Button, Input } = $.ui.resolve(e)
@@ -490,176 +653,304 @@ export function register(on) {
     const armed = approveAll && now < approveUntil
 
     const spacer = () => Text({ children: [' '] })
-    const card = (title, right, color, children) =>
-      Box({
-        flexDirection: 'column',
-        borderStyle: 'round',
-        borderColor: color,
-        borderDimColor: !color,
-        paddingX: 1,
-        children: [
-          Box({
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            children: [Text({ bold: true, wrap: 'truncate-middle', children: [title] }), right ?? spacer()],
-          }),
-          ...children,
-        ],
-      })
-
-    // ---- cluster
-    const badge = !cluster.known
-      ? Text({ bold: true, inverse: true, color: 'red', children: [' STRICT '] })
-      : cluster.isProd
-        ? Text({ bold: true, inverse: true, color: 'red', children: [' PROD '] })
-        : Text({ color: 'green', children: ['non-prod'] })
-    const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', undefined, cluster.isProd ? 'red' : 'green', [
-      Box({
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        children: [Text({ dimColor: true, children: ['project  ' + (cluster.namespace || 'default')] }), badge],
-      }),
-    ])
-
-    // ---- guard
-    const guardCard = card('Guard', armed ? Text({ bold: true, color: 'yellow', children: ['ON · ' + mmss(approveUntil - now)] }) : undefined, armed ? 'yellow' : undefined, [
-      Button({
-        key: 'approve-all',
-        label: armed ? 'Approve all (a): ON, press to stop' : 'Approve all (a): off',
-        hotkey: 'a',
-        dimColor: !armed,
-        onPress: async () => {
-          await setApprove($, !armed)
-        },
-      }),
-      Text({
-        dimColor: true,
-        wrap: 'wrap',
-        children: [
-          armed
-            ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
-            : cluster.isProd
-              ? 'Asking before every cluster-changing command.'
-              : 'Non-prod: only commands that set their own target are asked.',
-        ],
-      }),
-      Text({ dimColor: true, wrap: 'wrap', children: ['Secrets are redacted from command output. Audit: /audit'] }),
-    ])
-
-    // ---- todos
-    const doneCount = todos.filter((t) => t.done).length
-    const todoCard = card('Todo' + (repoName ? ' · ' + repoName : ''), Text({ dimColor: true, children: [doneCount + '/' + todos.length] }), undefined, [
+    // a filled label: " PROD ", " ON 14:32 "
+    const chip = (label, bg) =>
+      Text({ bold: true, color: THEME.onColor, backgroundColor: bg, children: [' ' + label + ' '] })
+    // "label  value" pair, label muted
+    const field = (label, value, valueColor) =>
       Box({
         flexDirection: 'row',
         columnGap: 1,
         children: [
-          Input({
-            key: 'new-todo',
-            label: 'new',
-            placeholder: 'type a task, Enter',
-            value: draft,
-            submitLabel: 'add',
-            onInput: (value) => {
-              draft = value
-            },
-            onSubmit: async (value) => {
-              const text = value.trim()
-              if (!text) return
-              draft = ''
-              await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
-            },
+          Text({ color: THEME.muted, children: [label.padEnd(8)] }),
+          Box({ flexGrow: 1, children: [Text({ color: valueColor, wrap: 'truncate-end', children: [value] })] }),
+        ],
+      })
+    // A card: coloured border, a header row (title left, status right), then groups of rows
+    // separated by a blank line so the card breathes.
+    const card = (title, right, color, groups) =>
+      Box({
+        flexDirection: 'column',
+        borderStyle: 'round',
+        borderColor: color ?? THEME.muted,
+        paddingX: 1,
+        rowGap: 1,
+        children: [
+          Box({
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            children: [
+              Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [title] }),
+              right ?? spacer(),
+            ],
           }),
+          ...groups.map((g) => Box({ flexDirection: 'column', children: g })),
+        ],
+      })
+
+    // ---- cluster
+    const level = !cluster.known ? THEME.danger : cluster.isProd ? THEME.danger : THEME.ok
+    const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
+    const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
+      [field('project', cluster.namespace || 'default', THEME.text)],
+    ])
+
+    // ---- aws: profile, region, signed-in role, and whether the login still works
+    const AWS_BADGE = {
+      ok: chip('signed in', THEME.ok),
+      expired: chip('SSO EXPIRED', THEME.danger),
+      error: chip('unreachable', THEME.warn),
+      checking: Text({ color: THEME.muted, children: ['… checking'] }),
+      logging: Text({ color: THEME.accent, children: ['… logging in'] }),
+      unknown: Text({ color: THEME.muted, children: ['… not checked'] }),
+    }
+    const awsColor = aws.status === 'logging' ? THEME.accent : aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
+    const awsCard = card('AWS', AWS_BADGE[aws.status], awsColor, [
+      [
+        field('profile', aws.profile, THEME.text),
+        ...(aws.region ? [field('region', aws.region, THEME.text)] : []),
+        ...(aws.role ? [field('role', aws.role, THEME.text)] : []),
+        ...(aws.checkedAt ? [field('checked', hhmm(aws.checkedAt), THEME.muted)] : []),
+      ],
+      ...(aws.status === 'expired'
+        ? [[Text({ color: THEME.danger, wrap: 'wrap', children: ['Press Log in, or run in a terminal: aws sso login --profile ' + aws.profile] })]]
+        : aws.status === 'error'
+          ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Could not reach AWS (network, or the CLI failed). Login state is unknown.'] })]]
+          : []),
+      ...(aws.lastLogin && !aws.lastLogin.ok && aws.status !== 'ok' && aws.status !== 'logging'
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Last login attempt ended after ' + aws.lastLogin.secs + 's: ' + (aws.lastLogin.note || 'no detail')] })]]
+        : []),
+      ...(aws.status === 'expired' || aws.status === 'error' || aws.status === 'logging'
+        ? [
+            [
+              Button({
+                key: 'aws-login',
+                label: aws.status === 'logging' ? '…  Approve in your browser' : '▶  Log in with SSO',
+                variant: 'primary',
+                hover: { scope: 'hv-aws-login', color: THEME.onColor, backgroundColor: THEME.accent },
+                onPress: () => {
+                  if (aws.status === 'logging' || awsLoginWanted) return
+                  awsLoginWanted = true
+                  aws.status = 'logging'
+                  $.ui.invalidate('ui.render')
+                },
+              }),
+            ],
+          ]
+        : []),
+      [
+        Button({
+          key: 'aws-recheck',
+          label: '↻  Recheck',
+          variant: 'secondary',
+          hover: { scope: 'hv-aws', color: THEME.onColor, backgroundColor: THEME.accent },
+          onPress: () => checkAws($, true),
+        }),
+      ],
+    ])
+
+    // ---- guard
+    const guardCard = card(
+      'Guard',
+      armed ? chip('ON · ' + mmss(approveUntil - now), THEME.warn) : Text({ color: THEME.ok, children: ['● guarding'] }),
+      armed ? THEME.warn : THEME.accent,
+      [
+        [
           Button({
-            key: 'add-todo',
-            label: 'Add',
+            key: 'approve-all',
+            label: armed ? '■  ON · press to stop  (a)' : '▶  Approve all  (a)',
+            hotkey: 'a',
+            variant: armed ? 'primary' : 'secondary',
+            hover: { scope: 'hv-approve', color: THEME.onColor, backgroundColor: armed ? THEME.warn : THEME.accent },
             onPress: async () => {
-              const text = draft.trim()
-              if (!text) return
-              draft = ''
-              await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
+              await setApprove($, !armed)
             },
           }),
         ],
-      }),
-      ...(todos.length === 0 ? [Text({ dimColor: true, children: ['nothing yet'] })] : []),
-      ...todos.map((t) =>
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          children: [
-            // No native checkbox element: a plain button that flips between the two glyphs.
-            Button({
-              key: 'done-' + t.id,
-              label: t.done ? '☑' : '☐',
-              plain: true,
-              onPress: () =>
-                mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
-            }),
-            Box({
-              flexGrow: 1,
-              children: [
-                Text({
-                  dimColor: t.done,
-                  italic: t.done,
-                  wrap: 'wrap',
-                  children: [t.text + (t.by === 'claude' ? '  · claude' : '')],
+        [
+          Text({
+            color: armed ? THEME.warn : THEME.muted,
+            wrap: 'wrap',
+            children: [
+              armed
+                ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
+                : cluster.isProd
+                  ? 'Asking before every cluster-changing command.'
+                  : 'Non-prod: only commands that set their own target are asked.',
+            ],
+          }),
+          Text({ color: THEME.muted, wrap: 'wrap', children: ['Secrets are redacted from output. Log: /audit'] }),
+        ],
+      ],
+    )
+
+    // ---- todos: open tasks in the Todo card, finished ones in the Done card
+    const open = todos.filter((t) => !t.done)
+    const finished = todos.filter((t) => t.done)
+    const doneCount = finished.length
+    const bar = todos.length === 0 ? '' : '▰'.repeat(doneCount) + '▱'.repeat(open.length) + ' '
+    const addTodo = async (value) => {
+      const text = String(value ?? '').trim()
+      if (!text) return
+      draft = ''
+      await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
+    }
+    // A thin line between two tasks
+    const divider = (id) =>
+      Text({ key: 'sep-' + id, color: THEME.muted, dimColor: true, wrap: 'truncate', children: ['─'.repeat(PANE_COLUMNS)] })
+    // One task row. No native checkbox element: a plain button that flips between two glyphs.
+    const taskRow = (t) =>
+      Box({
+        flexDirection: 'column',
+        children: [
+          Box({
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Button({
+                key: 'done-' + t.id,
+                label: t.done ? '☑' : '☐',
+                plain: true,
+                onPress: () =>
+                  mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
+              }),
+              Box({
+                flexGrow: 1,
+                children: [
+                  Text({
+                    color: t.done ? THEME.muted : THEME.text,
+                    strikethrough: t.done,
+                    wrap: 'wrap',
+                    children: [t.text],
+                  }),
+                ],
+              }),
+              Button({
+                key: 'del-' + t.id,
+                label: '✕',
+                plain: true,
+                hover: { scope: 'hv-del-' + t.id, color: THEME.danger },
+                onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
+              }),
+            ],
+          }),
+          ...(t.by === 'claude'
+            ? [Box({ paddingLeft: 3, children: [Text({ color: THEME.brand, dimColor: true, children: ['✦ added by Claude'] })] })]
+            : []),
+        ],
+      })
+    // rows with a divider between each pair
+    const withDividers = (list) => list.flatMap((t, i) => (i === 0 ? [taskRow(t)] : [divider(t.id), taskRow(t)]))
+
+    const todoCard = card(
+      'Todo' + (repoName ? ' · ' + repoName : ''),
+      Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [bar + doneCount + '/' + todos.length] }),
+      THEME.brand,
+      [
+        [
+          Box({
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Input({
+                key: 'new-todo',
+                label: 'new',
+                placeholder: 'type a task, Enter',
+                value: draft,
+                submitLabel: 'add',
+                onInput: (value) => {
+                  draft = value
+                },
+                onSubmit: addTodo,
+              }),
+              Button({
+                key: 'add-todo',
+                label: '+ Add',
+                variant: 'primary',
+                hover: { scope: 'hv-add', color: THEME.onColor, backgroundColor: THEME.brand },
+                onPress: () => addTodo(draft),
+              }),
+            ],
+          }),
+        ],
+        open.length === 0
+          ? [
+              Text({
+                color: THEME.muted,
+                italic: true,
+                children: [doneCount > 0 ? 'All caught up.' : 'Nothing yet. Add a task above, or ask Claude to.'],
+              }),
+            ]
+          : withDividers(open),
+      ],
+    )
+
+    // The Done card holds finished tasks and the Clear button. It only shows when there is something in it.
+    const doneCard =
+      doneCount === 0
+        ? null
+        : card(
+            'Done',
+            Text({ color: THEME.ok, children: [doneCount + ' finished'] }),
+            THEME.ok,
+            [
+              withDividers(finished),
+              [
+                Button({
+                  key: 'clear-done',
+                  label: 'Clear done (' + doneCount + ')',
+                  variant: 'secondary',
+                  hover: { scope: 'hv-clear', color: THEME.onColor, backgroundColor: THEME.danger },
+                  onPress: () => mutateTodos($, (list) => list.filter((x) => !x.done)),
                 }),
               ],
-            }),
-            Button({
-              key: 'del-' + t.id,
-              label: 'x',
-              onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
-            }),
-          ],
-        }),
-      ),
-      ...(doneCount > 0
-        ? [
-            Button({
-              key: 'clear-done',
-              label: 'Clear done (' + doneCount + ')',
-              onPress: () => mutateTodos($, (list) => list.filter((x) => !x.done)),
-            }),
-          ]
-        : []),
-    ])
+            ],
+          )
 
-    // ---- recent cluster commands: tag and time on one line, the command truncated below it
+    // ---- recent cluster commands: one line each, time + outcome chip + the command
     const OUTCOME = {
-      approved: ['approved', 'green'],
-      refused: ['REFUSED', 'red'],
-      auto: ['AUTO', 'yellow'],
-      'non-prod': ['non-prod', undefined],
+      approved: ['approved', THEME.ok],
+      refused: ['REFUSED', THEME.danger],
+      auto: ['AUTO', THEME.warn],
+      'non-prod': ['non-prod', THEME.muted],
     }
-    const activityCard = card('Cluster commands', undefined, undefined, [
-      ...(activity.length === 0 ? [Text({ dimColor: true, children: ['none this session'] })] : []),
-      ...activity.map((a) => {
-        const [tag, color] = OUTCOME[a.outcome] ?? [a.outcome, undefined]
-        return Box({
-          flexDirection: 'column',
-          children: [
-            Box({
+    const activityCard = card('Cluster commands', undefined, THEME.muted, [
+      activity.length === 0
+        ? [Text({ color: THEME.muted, italic: true, children: ['None this session.'] })]
+        : activity.map((a) => {
+            const [tag, bg] = OUTCOME[a.outcome] ?? [a.outcome, THEME.muted]
+            return Box({
               flexDirection: 'row',
               columnGap: 1,
               children: [
-                Text({ dimColor: true, children: [hhmm(a.at)] }),
-                Text({ bold: true, color, children: [tag] }),
+                Text({ color: THEME.muted, children: [hhmm(a.at)] }),
+                chip(tag, bg),
+                Box({ flexGrow: 1, children: [Text({ color: THEME.muted, wrap: 'truncate-end', children: [a.cmd] })] }),
               ],
-            }),
-            Text({ dimColor: true, wrap: 'truncate-end', children: [a.cmd] }),
-          ],
-        })
-      }),
+            })
+          }),
     ])
 
+    const footer = Text({ color: THEME.muted, children: ['/deck close  ·  ctrl+x tab focuses'] })
+
     // Outside cluster work only the todo card shows. The cluster cards appear once a cluster
-    // is detected, a cluster command has run, or approve-all is on. The guard itself never
-    // depends on what is drawn: it acts on every cluster command either way.
+    // is detected, a cluster command has run, or approve-all is on; the AWS card whenever a
+    // profile resolves. The guard itself never depends on what is drawn: it acts on every
+    // cluster command either way.
     const showCluster = cluster.known || activity.length > 0 || armed
     return Box({
       flexDirection: 'column',
-      children: showCluster ? [clusterCard, guardCard, todoCard, activityCard] : [todoCard],
+      gap: 1,
+      children: [
+        Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
+        ...(showCluster ? [clusterCard] : []),
+        ...(aws.profile ? [awsCard] : []),
+        ...(showCluster ? [guardCard] : []),
+        todoCard,
+        ...(doneCard ? [doneCard] : []),
+        ...(showCluster ? [activityCard] : []),
+        footer,
+      ],
     })
   })
 }
