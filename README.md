@@ -153,7 +153,17 @@ Output of cluster commands is masked before Claude reads it.
 
 ## Audit log
 
-`~/.kube-deck/audit.jsonl` (directory `0700`, file `0600`; older world-readable files are tightened on the next write). One JSON line per cluster-changing command: time, outcome (`approved` / `auto` / `non-prod` / `refused`), cluster, project, repo, and the command with tokens masked. `/audit` shows the path and the last 10 entries.
+`~/.kube-deck/audit.jsonl` (directory `0700`, file `0600`; older world-readable files are tightened on the next write). One JSON line per cluster-changing command: time, outcome (`approved` / `auto` / `non-prod` / `refused`), cluster, project, repo, and the command with secrets masked. `/audit` shows the path and the last 10 entries.
+
+The same masking applies to the recent-commands card. Only the logged or shown copy is masked; the command runs as written, and the approval dialog shows it as it is. It covers:
+
+- any `--flag` whose name holds `token`, `password`, `secret` or `key` (`--token`, `--docker-password`, `--client-secret`, …)
+- `oc login -p …`, `--from-literal=key=value`, and `helm --set …password=value`
+- `NAME=value` assignments for credential-looking names (`AWS_SECRET_ACCESS_KEY=…`, `GITHUB_TOKEN=…`)
+- `Authorization` / `Bearer` / `Basic` values and `user:password@` in URLs
+- AWS, GitHub, Slack and JWT token formats, and `sha256~…` OpenShift tokens
+
+It is regex-based and knows these usual shapes. A secret in a positional argument, a here-doc or a file the command reads is not caught.
 
 ## To-do list
 
