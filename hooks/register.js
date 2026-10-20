@@ -12,6 +12,19 @@ const APPROVE_MINUTES = 15
 // Audit log: $HOME/<AUDIT_DIR>/audit.jsonl, one JSON line per cluster-changing command.
 const AUDIT_DIR = '.kube-deck'
 
+// Panel colors. Theme keys, not hex: they follow the person's light/dark theme. Change a
+// value here to restyle the whole panel (any theme key, or a color string).
+const THEME = {
+  brand: 'claude', // title, todo card
+  accent: 'suggestion', // guard card, primary actions
+  ok: 'success', // non-prod, approved, all done
+  warn: 'warning', // approve-all ON
+  danger: 'error', // PROD, refused, delete
+  muted: 'subtle', // secondary text, borders
+  text: 'text',
+  onColor: 'inverseText', // text drawn on a filled chip or hovered button
+}
+
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
 // approveAll is deliberately never persisted: every new session starts guarded.
@@ -482,7 +495,8 @@ export function register(on) {
       : 'The kube-deck guard failed (' + next.error.kind + '), so this command was not run. Tell the user.',
   }))
 
-  // ---- the panel: cluster, guard, todos, recent cluster commands, as bordered cards
+  // ---- the panel: cluster, guard, todos, recent cluster commands, as bordered cards.
+  // Colors are theme keys (THEME, top of file), so the panel follows light/dark mode.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
     const { Box, Text, Button, Input } = $.ui.resolve(e)
@@ -490,168 +504,208 @@ export function register(on) {
     const armed = approveAll && now < approveUntil
 
     const spacer = () => Text({ children: [' '] })
-    const card = (title, right, color, children) =>
-      Box({
-        flexDirection: 'column',
-        borderStyle: 'round',
-        borderColor: color,
-        borderDimColor: !color,
-        paddingX: 1,
-        children: [
-          Box({
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            children: [Text({ bold: true, wrap: 'truncate-middle', children: [title] }), right ?? spacer()],
-          }),
-          ...children,
-        ],
-      })
-
-    // ---- cluster
-    const badge = !cluster.known
-      ? Text({ bold: true, inverse: true, color: 'red', children: [' STRICT '] })
-      : cluster.isProd
-        ? Text({ bold: true, inverse: true, color: 'red', children: [' PROD '] })
-        : Text({ color: 'green', children: ['non-prod'] })
-    const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', undefined, cluster.isProd ? 'red' : 'green', [
-      Box({
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        children: [Text({ dimColor: true, children: ['project  ' + (cluster.namespace || 'default')] }), badge],
-      }),
-    ])
-
-    // ---- guard
-    const guardCard = card('Guard', armed ? Text({ bold: true, color: 'yellow', children: ['ON · ' + mmss(approveUntil - now)] }) : undefined, armed ? 'yellow' : undefined, [
-      Button({
-        key: 'approve-all',
-        label: armed ? 'Approve all (a): ON, press to stop' : 'Approve all (a): off',
-        hotkey: 'a',
-        dimColor: !armed,
-        onPress: async () => {
-          await setApprove($, !armed)
-        },
-      }),
-      Text({
-        dimColor: true,
-        wrap: 'wrap',
-        children: [
-          armed
-            ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
-            : cluster.isProd
-              ? 'Asking before every cluster-changing command.'
-              : 'Non-prod: only commands that set their own target are asked.',
-        ],
-      }),
-      Text({ dimColor: true, wrap: 'wrap', children: ['Secrets are redacted from command output. Audit: /audit'] }),
-    ])
-
-    // ---- todos
-    const doneCount = todos.filter((t) => t.done).length
-    const todoCard = card('Todo' + (repoName ? ' · ' + repoName : ''), Text({ dimColor: true, children: [doneCount + '/' + todos.length] }), undefined, [
+    // a filled label: " PROD ", " ON 14:32 "
+    const chip = (label, bg) =>
+      Text({ bold: true, color: THEME.onColor, backgroundColor: bg, children: [' ' + label + ' '] })
+    // "label  value" pair, label muted
+    const field = (label, value, valueColor) =>
       Box({
         flexDirection: 'row',
         columnGap: 1,
         children: [
-          Input({
-            key: 'new-todo',
-            label: 'new',
-            placeholder: 'type a task, Enter',
-            value: draft,
-            submitLabel: 'add',
-            onInput: (value) => {
-              draft = value
-            },
-            onSubmit: async (value) => {
-              const text = value.trim()
-              if (!text) return
-              draft = ''
-              await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
-            },
+          Text({ color: THEME.muted, children: [label.padEnd(8)] }),
+          Box({ flexGrow: 1, children: [Text({ color: valueColor, wrap: 'truncate-end', children: [value] })] }),
+        ],
+      })
+    // A card: coloured border, a header row (title left, status right), then groups of rows
+    // separated by a blank line so the card breathes.
+    const card = (title, right, color, groups) =>
+      Box({
+        flexDirection: 'column',
+        borderStyle: 'round',
+        borderColor: color ?? THEME.muted,
+        paddingX: 1,
+        rowGap: 1,
+        children: [
+          Box({
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            children: [
+              Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [title] }),
+              right ?? spacer(),
+            ],
           }),
+          ...groups.map((g) => Box({ flexDirection: 'column', children: g })),
+        ],
+      })
+
+    // ---- cluster
+    const level = !cluster.known ? THEME.danger : cluster.isProd ? THEME.danger : THEME.ok
+    const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
+    const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
+      [field('project', cluster.namespace || 'default', THEME.text)],
+    ])
+
+    // ---- guard
+    const guardCard = card(
+      'Guard',
+      armed ? chip('ON · ' + mmss(approveUntil - now), THEME.warn) : Text({ color: THEME.ok, children: ['● guarding'] }),
+      armed ? THEME.warn : THEME.accent,
+      [
+        [
           Button({
-            key: 'add-todo',
-            label: 'Add',
+            key: 'approve-all',
+            label: armed ? '■  ON · press to stop  (a)' : '▶  Approve all  (a)',
+            hotkey: 'a',
+            variant: armed ? 'primary' : 'secondary',
+            hover: { scope: 'hv-approve', color: THEME.onColor, backgroundColor: armed ? THEME.warn : THEME.accent },
             onPress: async () => {
-              const text = draft.trim()
-              if (!text) return
-              draft = ''
-              await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
+              await setApprove($, !armed)
             },
           }),
         ],
-      }),
-      ...(todos.length === 0 ? [Text({ dimColor: true, children: ['nothing yet'] })] : []),
-      ...todos.map((t) =>
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          children: [
-            // No native checkbox element: a plain button that flips between the two glyphs.
-            Button({
-              key: 'done-' + t.id,
-              label: t.done ? '☑' : '☐',
-              plain: true,
-              onPress: () =>
-                mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
-            }),
-            Box({
-              flexGrow: 1,
-              children: [
-                Text({
-                  dimColor: t.done,
-                  italic: t.done,
-                  wrap: 'wrap',
-                  children: [t.text + (t.by === 'claude' ? '  · claude' : '')],
+        [
+          Text({
+            color: armed ? THEME.warn : THEME.muted,
+            wrap: 'wrap',
+            children: [
+              armed
+                ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
+                : cluster.isProd
+                  ? 'Asking before every cluster-changing command.'
+                  : 'Non-prod: only commands that set their own target are asked.',
+            ],
+          }),
+          Text({ color: THEME.muted, wrap: 'wrap', children: ['Secrets are redacted from output. Log: /audit'] }),
+        ],
+      ],
+    )
+
+    // ---- todos
+    const doneCount = todos.filter((t) => t.done).length
+    const bar = todos.length === 0 ? '' : '▰'.repeat(doneCount) + '▱'.repeat(todos.length - doneCount) + ' '
+    const addTodo = async (value) => {
+      const text = String(value ?? '').trim()
+      if (!text) return
+      draft = ''
+      await mutateTodos($, (list) => [...list, { id: newId(), text, done: false }])
+    }
+    const todoCard = card(
+      'Todo' + (repoName ? ' · ' + repoName : ''),
+      Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [bar + doneCount + '/' + todos.length] }),
+      THEME.brand,
+      [
+        [
+          Box({
+            flexDirection: 'row',
+            columnGap: 1,
+            children: [
+              Input({
+                key: 'new-todo',
+                label: 'new',
+                placeholder: 'type a task, Enter',
+                value: draft,
+                submitLabel: 'add',
+                onInput: (value) => {
+                  draft = value
+                },
+                onSubmit: addTodo,
+              }),
+              Button({
+                key: 'add-todo',
+                label: '+ Add',
+                variant: 'primary',
+                hover: { scope: 'hv-add', color: THEME.onColor, backgroundColor: THEME.brand },
+                onPress: () => addTodo(draft),
+              }),
+            ],
+          }),
+        ],
+        todos.length === 0
+          ? [Text({ color: THEME.muted, italic: true, children: ['Nothing yet. Add a task above, or ask Claude to.'] })]
+          : todos.map((t) =>
+              Box({
+                flexDirection: 'column',
+                children: [
+                  Box({
+                    flexDirection: 'row',
+                    columnGap: 1,
+                    children: [
+                      // No native checkbox element: a plain button that flips between two glyphs.
+                      Button({
+                        key: 'done-' + t.id,
+                        label: t.done ? '☑' : '☐',
+                        plain: true,
+                        onPress: () =>
+                          mutateTodos($, (list) => list.map((x) => (x.id === t.id ? { ...x, done: !x.done } : x))),
+                      }),
+                      Box({
+                        flexGrow: 1,
+                        children: [
+                          Text({
+                            color: t.done ? THEME.muted : THEME.text,
+                            strikethrough: t.done,
+                            wrap: 'wrap',
+                            children: [t.text],
+                          }),
+                        ],
+                      }),
+                      Button({
+                        key: 'del-' + t.id,
+                        label: '✕',
+                        plain: true,
+                        hover: { scope: 'hv-del-' + t.id, color: THEME.danger },
+                        onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
+                      }),
+                    ],
+                  }),
+                  ...(t.by === 'claude'
+                    ? [Box({ paddingLeft: 3, children: [Text({ color: THEME.brand, dimColor: true, children: ['✦ added by Claude'] })] })]
+                    : []),
+                ],
+              }),
+            ),
+        ...(doneCount > 0
+          ? [
+              [
+                Button({
+                  key: 'clear-done',
+                  label: 'Clear done (' + doneCount + ')',
+                  variant: 'secondary',
+                  hover: { scope: 'hv-clear', color: THEME.onColor, backgroundColor: THEME.danger },
+                  onPress: () => mutateTodos($, (list) => list.filter((x) => !x.done)),
                 }),
               ],
-            }),
-            Button({
-              key: 'del-' + t.id,
-              label: 'x',
-              onPress: () => mutateTodos($, (list) => list.filter((x) => x.id !== t.id)),
-            }),
-          ],
-        }),
-      ),
-      ...(doneCount > 0
-        ? [
-            Button({
-              key: 'clear-done',
-              label: 'Clear done (' + doneCount + ')',
-              onPress: () => mutateTodos($, (list) => list.filter((x) => !x.done)),
-            }),
-          ]
-        : []),
-    ])
+            ]
+          : []),
+      ],
+    )
 
-    // ---- recent cluster commands: tag and time on one line, the command truncated below it
+    // ---- recent cluster commands: one line each, time + outcome chip + the command
     const OUTCOME = {
-      approved: ['approved', 'green'],
-      refused: ['REFUSED', 'red'],
-      auto: ['AUTO', 'yellow'],
-      'non-prod': ['non-prod', undefined],
+      approved: ['approved', THEME.ok],
+      refused: ['REFUSED', THEME.danger],
+      auto: ['AUTO', THEME.warn],
+      'non-prod': ['non-prod', THEME.muted],
     }
-    const activityCard = card('Cluster commands', undefined, undefined, [
-      ...(activity.length === 0 ? [Text({ dimColor: true, children: ['none this session'] })] : []),
-      ...activity.map((a) => {
-        const [tag, color] = OUTCOME[a.outcome] ?? [a.outcome, undefined]
-        return Box({
-          flexDirection: 'column',
-          children: [
-            Box({
+    const activityCard = card('Cluster commands', undefined, THEME.muted, [
+      activity.length === 0
+        ? [Text({ color: THEME.muted, italic: true, children: ['None this session.'] })]
+        : activity.map((a) => {
+            const [tag, bg] = OUTCOME[a.outcome] ?? [a.outcome, THEME.muted]
+            return Box({
               flexDirection: 'row',
               columnGap: 1,
               children: [
-                Text({ dimColor: true, children: [hhmm(a.at)] }),
-                Text({ bold: true, color, children: [tag] }),
+                Text({ color: THEME.muted, children: [hhmm(a.at)] }),
+                chip(tag, bg),
+                Box({ flexGrow: 1, children: [Text({ color: THEME.muted, wrap: 'truncate-end', children: [a.cmd] })] }),
               ],
-            }),
-            Text({ dimColor: true, wrap: 'truncate-end', children: [a.cmd] }),
-          ],
-        })
-      }),
+            })
+          }),
     ])
+
+    const footer = Text({ color: THEME.muted, children: ['/deck close  ·  ctrl+x tab focuses'] })
 
     // Outside cluster work only the todo card shows. The cluster cards appear once a cluster
     // is detected, a cluster command has run, or approve-all is on. The guard itself never
@@ -659,7 +713,12 @@ export function register(on) {
     const showCluster = cluster.known || activity.length > 0 || armed
     return Box({
       flexDirection: 'column',
-      children: showCluster ? [clusterCard, guardCard, todoCard, activityCard] : [todoCard],
+      gap: 1,
+      children: [
+        Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
+        ...(showCluster ? [clusterCard, guardCard, todoCard, activityCard] : [todoCard]),
+        footer,
+      ],
     })
   })
 }
