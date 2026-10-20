@@ -93,13 +93,13 @@ test('finished tasks move to the Done card, which holds Clear done; open tasks a
 })
 
 // The AWS card: profile from AWS_PROFILE, login state from `sts get-caller-identity`.
-function awsWorld(on: any, sts: { exitCode: number; stdout: string; stderr: string } | 'throw') {
+function awsWorld(on: any, sts: { exitCode: number; stdout: string; stderr: string } | 'throw', profile = 'dev') {
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
-  mock.env(on, { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' })
+  mock.env(on, { AWS_PROFILE: profile, KUBECONFIG: '', HOME: '/home/t' })
   on('session.root', () => ({ value: '/work/my-repo' }))
   on('fs.read', (_$: any, e: any) =>
-    String(e.path).endsWith('/.aws/config') ? { value: '[profile dev]\nregion = eu-west-1\n' } : { error: { kind: 'not_found' } },
+    String(e.path).endsWith('/.aws/config') ? { value: '[profile dev]\nregion = eu-west-1\n' } : { value: '' },
   )
   on('process.run', (_$: any, e: any) => {
     if (e.argv[0] === 'aws') return sts === 'throw' ? { error: { kind: 'failed' } } : { value: sts }
@@ -143,5 +143,52 @@ test('AWS card: a CLI that fails for another reason reads as unreachable', async
   await ui.press({ key: 'aws-recheck' })
   expect(await ui.find({ type: 'Text', text: /unreachable/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /signed in/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('AWS card: Log in shows while expired; /aws-login runs `aws sso login` for the profile, then re-checks', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  mock.env(on, { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.read', () => ({ value: '' }))
+  const ran: string[][] = []
+  let loggedIn = false
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] !== 'aws') return { value: { exitCode: 1, stdout: '', stderr: '' } }
+    ran.push(e.argv)
+    if (e.argv[1] === 'sso') {
+      loggedIn = true
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
+    return loggedIn
+      ? { value: { exitCode: 0, stdout: JSON.stringify({ Arn: 'arn:aws:iam::1:user/me' }), stderr: '' } }
+      : { value: { exitCode: 255, stdout: '', stderr: 'Token has expired and refresh failed' } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  expect(await ui.find({ key: 'aws-login' })).toBeUndefined() // nothing to fix yet
+  await ui.press({ key: 'aws-recheck' })
+  expect(await ui.find({ type: 'Text', text: /SSO EXPIRED/ })).toBeDefined()
+
+  // pressing queues the login (the plugin's timer runs it) and the button says what to do
+  await ui.press({ key: 'aws-login' })
+  expect(await ui.find({ type: 'Button', text: /Approve in your browser/ })).toBeDefined()
+  expect(ran.some((a) => a[1] === 'sso')).toBe(false) // not run by the press itself
+
+  // the typed command runs the same login directly
+  await $.command.run({ command: 'aws-login', args: '' })
+  expect(ran.some((a) => a.join(' ') === 'aws sso login --profile dev')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /signed in/ })).toBeDefined()
+  expect(await ui.find({ key: 'aws-login' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('AWS card: a profile name that looks like an option is ignored', async ($, on) => {
+  awsWorld(on, { exitCode: 0, stdout: '{}', stderr: '' }, '--endpoint-url=http://evil')
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ key: 'aws-recheck' })).toBeUndefined()
   await ui.unmount()
 })

@@ -10,6 +10,9 @@ const KUBE_CLI = 'oc'
 // Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
 const AWS_CLI = 'aws'
 const AWS_CHECK_MS = 5 * 60000
+// How long `aws sso login` may wait for you to approve in the browser.
+const AWS_LOGIN_MS = 3 * 60000
+const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
 // Audit log: $HOME/<AUDIT_DIR>/audit.jsonl, one JSON line per cluster-changing command.
@@ -36,8 +39,10 @@ let approveAll = false
 let approveUntil = 0
 let todos = []
 // AWS profile (resolved like the old session bar did) and whether its login still works.
-// status: none (no profile) | unknown | checking | ok | expired | error
+// status: none (no profile) | unknown | checking | logging | ok | expired | error
 let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0 }
+// Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
+let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
 let todoKey = 'todos'
 let repoName = ''
@@ -136,6 +141,8 @@ async function resolveAws($) {
     const names = Object.keys(sections).filter((n) => n.startsWith('profile '))
     if (names.length === 1) profile = names[0].slice('profile '.length).trim()
   }
+  // the name ends up in a command line: only plain profile-name characters, never an option
+  if (!AWS_PROFILE_RE.test(profile)) profile = ''
   const section = sections[profile === 'default' ? 'default' : 'profile ' + profile]
   if (profile !== aws.profile) {
     // a different profile: forget what we knew and check again soon
@@ -148,7 +155,7 @@ async function resolveAws($) {
 // Is the login for the profile still good? A real call, not a guess from the token file, so
 // "unreachable" (network, CLI failure) is kept apart from "expired" and never read as healthy.
 async function checkAws($, force) {
-  if (!aws.profile || aws.status === 'checking') return
+  if (!aws.profile || aws.status === 'checking' || aws.status === 'logging') return
   const now = await $.clock.now()
   if (!force && aws.checkedAt && now - aws.checkedAt < AWS_CHECK_MS) return
   const profile = aws.profile
@@ -175,6 +182,23 @@ async function checkAws($, force) {
   aws.role = role
   aws.checkedAt = await $.clock.now()
   $.ui.invalidate('ui.render')
+}
+
+// Runs `aws sso login` (opens the browser, waits for you to approve), then checks the result.
+// Started by the Log in button; this is the one place the panel runs a login for you.
+async function loginAws($) {
+  const profile = aws.profile
+  if (!profile) return
+  aws.status = 'logging'
+  $.ui.invalidate('ui.render')
+  let ok = false
+  try {
+    const r = await $.process.run([AWS_CLI, 'sso', 'login', '--profile', profile], { timeoutMs: AWS_LOGIN_MS })
+    ok = r.exitCode === 0
+  } catch {}
+  $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish (timed out, cancelled or failed)')
+  aws.status = 'unknown'
+  await checkAws($, true) // ask AWS, rather than trust the exit code
 }
 
 // ---- approve-all with an expiry
@@ -361,6 +385,11 @@ export function register(on) {
       immediate: true,
     })
     await $.command.register({
+      name: 'aws-login',
+      description: 'Run aws sso login for the panel\'s AWS profile (opens the browser)',
+      immediate: true,
+    })
+    await $.command.register({
       name: 'audit',
       description: 'Show the audit log path and its last 10 entries',
       immediate: true,
@@ -396,6 +425,10 @@ export function register(on) {
         if (approveAll) {
           await approveActive($)
           $.ui.invalidate('ui.render')
+        }
+        if (awsLoginWanted) {
+          awsLoginWanted = false
+          await loginAws($)
         }
       } catch {}
     })
@@ -528,6 +561,13 @@ export function register(on) {
     }
   })
 
+  on('command.run', { command: 'aws-login' }, async ($) => {
+    await resolveAws($)
+    if (!aws.profile) return { text: 'no AWS profile found (set AWS_PROFILE, or put one in .aws-profile)' }
+    await loginAws($)
+    return { text: 'aws: ' + aws.profile + ' (' + aws.status + ')' }
+  })
+
   on('command.run', { command: 'audit' }, async ($) => {
     let path = AUDIT_DIR + '/audit.jsonl'
     try {
@@ -647,9 +687,10 @@ export function register(on) {
       expired: chip('SSO EXPIRED', THEME.danger),
       error: chip('unreachable', THEME.warn),
       checking: Text({ color: THEME.muted, children: ['… checking'] }),
+      logging: Text({ color: THEME.accent, children: ['… logging in'] }),
       unknown: Text({ color: THEME.muted, children: ['… not checked'] }),
     }
-    const awsColor = aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
+    const awsColor = aws.status === 'logging' ? THEME.accent : aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
     const awsCard = card('AWS', AWS_BADGE[aws.status], awsColor, [
       [
         field('profile', aws.profile, THEME.text),
@@ -658,10 +699,28 @@ export function register(on) {
         ...(aws.checkedAt ? [field('checked', hhmm(aws.checkedAt), THEME.muted)] : []),
       ],
       ...(aws.status === 'expired'
-        ? [[Text({ color: THEME.danger, wrap: 'wrap', children: ['Log in again in a terminal: aws sso login --profile ' + aws.profile] })]]
+        ? [[Text({ color: THEME.danger, wrap: 'wrap', children: ['Press Log in, or run in a terminal: aws sso login --profile ' + aws.profile] })]]
         : aws.status === 'error'
           ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Could not reach AWS (network, or the CLI failed). Login state is unknown.'] })]]
           : []),
+      ...(aws.status === 'expired' || aws.status === 'error' || aws.status === 'logging'
+        ? [
+            [
+              Button({
+                key: 'aws-login',
+                label: aws.status === 'logging' ? '…  Approve in your browser' : '▶  Log in with SSO',
+                variant: 'primary',
+                hover: { scope: 'hv-aws-login', color: THEME.onColor, backgroundColor: THEME.accent },
+                onPress: () => {
+                  if (aws.status === 'logging' || awsLoginWanted) return
+                  awsLoginWanted = true
+                  aws.status = 'logging'
+                  $.ui.invalidate('ui.render')
+                },
+              }),
+            ],
+          ]
+        : []),
       [
         Button({
           key: 'aws-recheck',

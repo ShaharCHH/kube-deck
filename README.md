@@ -6,7 +6,7 @@ Claude Code mod (CLI + desktop). Needs Claude Code >= 2.1.287.
 
 - **Right-hand panel (`/deck`):** cards for cluster, AWS, guard, todo, done and cluster commands.
   - *Cluster:* name, project, a red `PROD` badge (green `non-prod`, `STRICT` when the cluster can't be read).
-  - *AWS:* profile, region, signed-in role and whether the login works (`signed in` / `SSO EXPIRED` / `unreachable`), with a `Recheck` button. Profile comes from `AWS_PROFILE`, then a `.aws-profile` file in the project root, then the only profile in `~/.aws/config`. The login is checked with `aws sts get-caller-identity` at most every 5 minutes, in the background. The account id is never shown.
+  - *AWS:* profile, region, signed-in role and whether the login works (`signed in` / `SSO EXPIRED` / `unreachable`), with a `Recheck` button. When the login is expired or unreachable a `Log in with SSO` button appears: it runs `aws sso login --profile <profile>` (opens your browser, waits up to 3 minutes for you to approve), then re-checks. `/aws-login` does the same from the prompt. Profile comes from `AWS_PROFILE`, then a `.aws-profile` file in the project root, then the only profile in `~/.aws/config`. The login is checked with `aws sts get-caller-identity` at most every 5 minutes, in the background. The account id is never shown.
   - *Guard:* `Approve all` button (hotkey `a`) with a countdown while on.
   - *Todo:* add field + `Add`, `☐`/`☑` per item, `x`, `Clear done`, `done/total` count.
   - *Cluster commands:* the last 8 cluster-changing commands with outcome.
@@ -24,7 +24,7 @@ Claude Code mod (CLI + desktop). Needs Claude Code >= 2.1.287.
 - **Todo (per repo):** each project root has its own list, kept in `$.store` (shared by all sessions on the machine). `/todo add <text>` adds from the prompt.
 - **Claude adds todos on its own:** tool `mcp__kube-deck__todo` (list / add / done / update, no delete) plus a short static system-prompt section telling it to add concrete follow-ups without asking. Its items are tagged `· claude`, duplicates are skipped, you get a toast per change, you discard with `x`. It edits an item only after discussing it with you.
 - **Refresh:** cluster and project are re-read on every prompt (3s timeout), at session start, on `/ctx`, and around each cluster command.
-- `/ctx` prints cluster, project, guard and AWS state.
+- `/ctx` prints cluster, project, guard and AWS state. The profile name is only used if it is a plain name (letters, digits, `_.@+=,-`), since it goes into a command line.
 
 ## Run
 
