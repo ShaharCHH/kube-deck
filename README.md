@@ -1,5 +1,8 @@
 # kube-deck
 
+[![tests](https://github.com/ShaharCHH/kube-deck/actions/workflows/test.yml/badge.svg)](https://github.com/ShaharCHH/kube-deck/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A safety net and control panel for working on Kubernetes / OpenShift and AWS with Claude Code.**
 
 kube-deck is a [Claude Code](https://claude.com/claude-code) mod (works in the terminal and the desktop app). It sits between Claude and your clusters: it asks before Claude changes anything on prod, hides secrets from what Claude reads, keeps an audit log, and gives you a side panel to see and switch which AWS profile and cluster you are on, log in to either from the panel, and keep a to-do list.
@@ -200,6 +203,8 @@ node tests/redact.test.mjs        # secret redaction
 claude plugin test                # engine tests (guard, panel, to-do)
 claude --plugin-dir .             # run it; saving a file hot-reloads
 ```
+
+GitHub Actions runs the plain-Node checks on every push and pull request (modules parse, manifests are valid JSON, classifier, redaction). `claude plugin validate` and `claude plugin test` need the Claude Code CLI, so run those locally before you open a PR. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 | File | Role |
 | --- | --- |

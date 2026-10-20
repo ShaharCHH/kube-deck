@@ -1,0 +1,37 @@
+name: tests
+
+# The classifier and the redaction are plain Node and run anywhere. The engine tests
+# (`claude plugin test`) and `claude plugin validate` need the Claude Code CLI, so run those locally.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      # actions are pinned to commit hashes, not tags
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 24
+
+      - name: Modules parse
+        run: |
+          for f in hooks/*.js; do node --check "$f"; done
+
+      - name: Manifests are valid JSON
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$f"
+          done
+
+      - name: Classifier
+        run: node tests/classify.test.mjs
+
+      - name: Redaction
+        run: node tests/redact.test.mjs
