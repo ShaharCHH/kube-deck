@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "description": "Safety net and control panel for Kubernetes / OpenShift and AWS work: asks before cluster changes on prod, redacts secrets, audit log, profile and cluster switching and login, todo list",
   "author": { "name": "Shahar" },
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }

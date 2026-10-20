@@ -42,6 +42,7 @@ kube-deck is a [Claude Code](https://claude.com/claude-code) mod (works in the t
 - [Configuration](#configuration)
 - [Limits](#limits)
 - [Development](#development)
+- [License](#license)
 
 ## Install
 
@@ -207,3 +208,7 @@ claude --plugin-dir .             # run it; saving a file hot-reloads
 | `hooks/redact.js` | Pure: masks Secret data in output. |
 | `types/index.d.ts` | The `$.state` contract (what was picked in the panel). |
 | `tests/` | Plain-node tests for the pure modules, engine tests for the rest. |
+
+## License
+
+[MIT](LICENSE) © 2026 Shahar Cohen Hadad. Use it, change it and share it freely; keep the copyright notice. It comes with no warranty, so test the guard on a non-prod cluster before you rely on it.
