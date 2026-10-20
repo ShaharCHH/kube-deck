@@ -52,7 +52,7 @@ test('with a cluster: all cards draw on terminal and desktop, and the controls w
   }
 })
 
-test('without a cluster: only the todo card draws', async ($, on) => {
+test('without a cluster: the todo and cluster-login cards draw, not the guard', async ($, on) => {
   setup(on, false)
   await $.command.run({ command: 'ctx', args: '' })
 
@@ -292,5 +292,63 @@ test('kubeconfig dropdown: lists kubeconfig files only; a pick sets KUBECONFIG, 
 
   await ui.select({ key: 'kubeconfig-select', value: '/etc/passwd' })
   expect(env.KUBECONFIG).toBe('/home/t/.kube/prod-eu.kubeconfig')
+  await ui.unmount()
+})
+
+function kubeLoginWorld(on: any, env: Record<string, string>, loginResult: { exitCode: number; stderr: string }) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  let created = false
+  on('fs.list', () => ({ value: created ? [{ name: 'sno-x-example-com.kubeconfig', kind: 'file' }] : [] }))
+  on('fs.read', () => ({ value: 'apiVersion: v1\nclusters: []\n' }))
+  const ran: any[] = []
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] === 'oc' && e.argv[1] === 'login') {
+      ran.push(e)
+      created = loginResult.exitCode === 0
+      return { value: { exitCode: loginResult.exitCode, stdout: '', stderr: loginResult.stderr } }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
+  })
+  return ran
+}
+
+test('cluster login: runs oc login --web into a file of its own, then switches to it', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await $.command.run({ command: 'kube-login', args: 'https://api.sno.x.example.com:6443' })
+
+  expect(ran.length).toBe(1)
+  expect(ran[0].argv).toEqual(['oc', 'login', '--web', '--server=https://api.sno.x.example.com:6443'])
+  expect(ran[0].init.env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig') // its own file
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig') // and the session now uses it
+})
+
+test('cluster login: a URL that is not a plain https host runs nothing', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  for (const bad of ['--token=abc', 'http://api.x.example.com:6443', 'https://x.example.com; rm -rf ~', 'https://x/../y']) {
+    await $.command.run({ command: 'kube-login', args: bad })
+  }
+  expect(ran.length).toBe(0)
+  expect(env.KUBECONFIG).toBe('')
+})
+
+test('cluster login: a failed login says why, drops URLs, and does not switch', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/old.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  kubeLoginWorld(on, env, { exitCode: 1, stderr: 'Open https://oauth.example/?code=SECRET to sign in' })
+  await $.command.run({ command: 'kube-login', args: 'https://api.sno.x.example.com:6443' })
+  const ui = await mount($, 'terminal')
+  const note = JSON.stringify(await ui.find({ type: 'Text', text: /Last login attempt ended/ }))
+  expect(note).toContain('<url>')
+  expect(note).not.toContain('SECRET')
+  expect(env.KUBECONFIG).toBe('/k/old.kubeconfig')
+  expect(await ui.find({ key: 'kube-login' })).toBeDefined()
   await ui.unmount()
 })

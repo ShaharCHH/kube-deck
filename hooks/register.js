@@ -13,6 +13,10 @@ const AWS_CHECK_MS = 5 * 60000
 // How long `aws sso login` may wait for you to approve in the browser (10 minutes is the most
 // $.process.run allows). Killing it earlier leaves the browser's redirect with nothing to connect to.
 const AWS_LOGIN_MS = 10 * 60000
+// How long `oc login --web` may wait for you to approve in the browser (same cap as above).
+const KUBE_LOGIN_MS = 10 * 60000
+// API URL typed in the panel: https, a host name, optional port. It ends up in a command line.
+const KUBE_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/
 const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
@@ -35,7 +39,7 @@ const THEME = {
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
 // approveAll is deliberately never persisted: every new session starts guarded.
-let cluster = { known: false, name: '', namespace: '', isProd: true }
+let cluster = { known: false, name: '', namespace: '', server: '', isProd: true }
 let approveAll = false
 let approveUntil = 0
 let todos = []
@@ -48,6 +52,12 @@ let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0, las
 let awsProfiles = []
 let kubeconfigs = []
 let kubeconfig = ''
+// Cluster login: the API URL typed in the panel, how the last attempt ended, and the flag the
+// Log in button sets for the 1s timer (same pattern as the AWS login below).
+// kubeLogin.status: idle | logging
+let kubeServerDraft = ''
+let kubeLogin = { status: 'idle', last: null }
+let kubeLoginWanted = false
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
@@ -104,7 +114,7 @@ async function refreshCluster($) {
   const haystack = [kubeconfig, name, entryName, server].join(' ')
   const isProd = !known || PROD_PATTERNS.some((re) => re.test(haystack))
 
-  cluster = { known, name, namespace, isProd }
+  cluster = { known, name, namespace, server, isProd }
   $.ui.invalidate('ui.render')
 }
 
@@ -273,6 +283,54 @@ async function switchKubeconfig($, path) {
   kubeconfig = path
   await refreshCluster($) // re-judges prod / non-prod for the new file
   $.ui.toast('Kubeconfig is now ' + path.split('/').pop() + (wasArmed ? '; approve-all switched off' : ''))
+}
+
+// Logs in to a cluster through the browser (`oc login --web`) into a kubeconfig file of its own,
+// so no kubeconfig has to exist first and no other file is touched. No password or token passes
+// through the panel. Logging in again to the cluster already in use refreshes that same file.
+async function loginKube($, typed) {
+  const url = String(typed || kubeServerDraft || cluster.server || '').trim().replace(/\/+$/, '')
+  if (!KUBE_SERVER_RE.test(url)) {
+    return $.ui.toast('Type the cluster API URL first, like https://api.mycluster.example.com:6443')
+  }
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {}
+  if (!home) return $.ui.toast('Cannot log in: HOME is not set')
+  const host = /^https:\/\/([^:/]+)/.exec(url)[1].replace(/^api\./, '').replace(/[^A-Za-z0-9]+/g, '-')
+  const reuse = kubeconfig && url === cluster.server
+  const file = reuse ? kubeconfig : home + '/.kube/' + host + '.kubeconfig'
+  kubeLogin = { status: 'logging', last: null }
+  $.ui.invalidate('ui.render')
+  const started = await $.clock.now()
+  let ok = false
+  let note = ''
+  try {
+    const r = await $.process.run([KUBE_CLI, 'login', '--web', '--server=' + url], {
+      timeoutMs: KUBE_LOGIN_MS,
+      env: { KUBECONFIG: file },
+    })
+    ok = r.exitCode === 0
+    if (!ok) {
+      const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+    }
+  } catch (err) {
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+  }
+  const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  kubeLogin = { status: 'idle', last: { ok, secs, note } }
+  if (ok) {
+    kubeServerDraft = ''
+    await discoverKubeconfigs($)
+    if (file === kubeconfig) await refreshCluster($)
+    else await switchKubeconfig($, file) // also re-judges prod and switches approve-all off
+    $.ui.toast('Logged in to ' + host)
+  } else {
+    $.ui.toast('Cluster login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
+  }
+  $.ui.invalidate('ui.render')
 }
 
 // ---- approve-all with an expiry
@@ -464,6 +522,11 @@ export function register(on) {
       immediate: true,
     })
     await $.command.register({
+      name: 'kube-login',
+      description: 'Log in to a cluster in the browser: /kube-login https://api.mycluster.example.com:6443 (no URL = the current cluster)',
+      immediate: true,
+    })
+    await $.command.register({
       name: 'audit',
       description: 'Show the audit log path and its last 10 entries',
       immediate: true,
@@ -500,6 +563,10 @@ export function register(on) {
         if (approveAll) {
           await approveActive($)
           $.ui.invalidate('ui.render')
+        }
+        if (kubeLoginWanted) {
+          kubeLoginWanted = false
+          await loginKube($)
         }
         if (awsLoginWanted) {
           awsLoginWanted = false
@@ -645,6 +712,12 @@ export function register(on) {
     return { text: 'aws: ' + aws.profile + ' (' + aws.status + ')' }
   })
 
+  on('command.run', { command: 'kube-login' }, async ($, e) => {
+    await loginKube($, String(e.args ?? '').trim())
+    await refreshCluster($)
+    return { text: (cluster.known ? cluster.name + (cluster.isProd ? ' (PROD)' : ' (non-prod)') : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
+  })
+
   on('command.run', { command: 'audit' }, async ($) => {
     let path = AUDIT_DIR + '/audit.jsonl'
     try {
@@ -752,6 +825,12 @@ export function register(on) {
       })
 
     // ---- cluster
+    const startKubeLogin = () => {
+      if (kubeLogin.status === 'logging' || kubeLoginWanted) return
+      kubeLoginWanted = true
+      kubeLogin = { status: 'logging', last: null }
+      $.ui.invalidate('ui.render')
+    }
     const level = !cluster.known ? THEME.danger : cluster.isProd ? THEME.danger : THEME.ok
     const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
@@ -768,6 +847,35 @@ export function register(on) {
               }),
             ],
           ]
+        : []),
+      [
+        Box({
+          flexDirection: 'row',
+          columnGap: 1,
+          children: [
+            Input({
+              key: 'kube-server',
+              label: 'api',
+              placeholder: cluster.server ? 'API URL (empty = this cluster)' : 'https://api.mycluster.example.com:6443',
+              value: kubeServerDraft,
+              submitLabel: 'log in',
+              onInput: (value) => {
+                kubeServerDraft = value
+              },
+              onSubmit: () => startKubeLogin(),
+            }),
+          ],
+        }),
+        Button({
+          key: 'kube-login',
+          label: kubeLogin.status === 'logging' ? '…  Approve in your browser' : '▶  Log in (browser)',
+          variant: 'primary',
+          hover: { scope: 'hv-kube-login', color: THEME.onColor, backgroundColor: THEME.accent },
+          onPress: () => startKubeLogin(),
+        }),
+      ],
+      ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.status !== 'logging'
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Last login attempt ended after ' + kubeLogin.last.secs + 's: ' + (kubeLogin.last.note || 'no detail')] })]]
         : []),
     ])
 
@@ -1022,17 +1130,17 @@ export function register(on) {
 
     const footer = Text({ color: THEME.muted, children: ['/deck close  ·  ctrl+x tab focuses'] })
 
-    // Outside cluster work only the todo card shows. The cluster cards appear once a cluster
-    // is detected, a cluster command has run, or approve-all is on; the AWS card whenever a
-    // profile resolves. The guard itself never depends on what is drawn: it acts on every
-    // cluster command either way.
-    const showCluster = cluster.known || activity.length > 0 || armed || kubeconfigs.length > 0
+    // The cluster card (it holds the login) and the todo card always show; the AWS card whenever
+    // a profile resolves. The guard and command cards appear once a cluster is detected, a
+    // cluster command has run, or approve-all is on. The guard itself never depends on what is
+    // drawn: it acts on every cluster command either way.
+    const showCluster = cluster.known || activity.length > 0 || armed || kubeconfigs.length > 0 || kubeLogin.status === 'logging'
     return Box({
       flexDirection: 'column',
       gap: 1,
       children: [
         Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
-        ...(showCluster ? [clusterCard] : []),
+        clusterCard, // always: it holds the cluster login
         ...(aws.profile ? [awsCard] : []),
         ...(showCluster ? [guardCard] : []),
         todoCard,
