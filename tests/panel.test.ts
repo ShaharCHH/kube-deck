@@ -192,3 +192,26 @@ test('AWS card: a profile name that looks like an option is ignored', async ($, 
   expect(await ui.find({ key: 'aws-recheck' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('AWS card: a login that ends early says how and why, and drops URLs from the message', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  mock.env(on, { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.read', () => ({ value: '' }))
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] !== 'aws') return { value: { exitCode: 1, stdout: '', stderr: '' } }
+    return e.argv[1] === 'sso'
+      ? { value: { exitCode: 1, stdout: '', stderr: 'Open https://device.example/?code=SECRET to sign in' } }
+      : { value: { exitCode: 255, stdout: '', stderr: 'Token has expired and refresh failed' } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+  await $.command.run({ command: 'aws-login', args: '' })
+  const ui = await mount($, 'terminal')
+  const note = JSON.stringify(await ui.find({ type: 'Text', text: /Last login attempt ended/ }))
+  expect(note).toContain('exit 1')
+  expect(note).toContain('<url>')
+  expect(note).not.toContain('SECRET')
+  expect(await ui.find({ key: 'aws-login' })).toBeDefined() // still expired: the button stays
+  await ui.unmount()
+})

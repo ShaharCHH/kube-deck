@@ -10,8 +10,9 @@ const KUBE_CLI = 'oc'
 // Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
 const AWS_CLI = 'aws'
 const AWS_CHECK_MS = 5 * 60000
-// How long `aws sso login` may wait for you to approve in the browser.
-const AWS_LOGIN_MS = 3 * 60000
+// How long `aws sso login` may wait for you to approve in the browser (10 minutes is the most
+// $.process.run allows). Killing it earlier leaves the browser's redirect with nothing to connect to.
+const AWS_LOGIN_MS = 10 * 60000
 const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
@@ -40,7 +41,8 @@ let approveUntil = 0
 let todos = []
 // AWS profile (resolved like the old session bar did) and whether its login still works.
 // status: none (no profile) | unknown | checking | logging | ok | expired | error
-let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0 }
+// lastLogin: how the last Log in attempt ended ({ ok, secs, note }), kept so a failure explains itself.
+let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0, lastLogin: null }
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
@@ -146,7 +148,7 @@ async function resolveAws($) {
   const section = sections[profile === 'default' ? 'default' : 'profile ' + profile]
   if (profile !== aws.profile) {
     // a different profile: forget what we knew and check again soon
-    aws = { profile, region: '', role: '', status: profile ? 'unknown' : 'none', checkedAt: 0 }
+    aws = { profile, region: '', role: '', status: profile ? 'unknown' : 'none', checkedAt: 0, lastLogin: null }
   }
   aws.region = section?.region ?? ''
   $.ui.invalidate('ui.render')
@@ -191,12 +193,24 @@ async function loginAws($) {
   if (!profile) return
   aws.status = 'logging'
   $.ui.invalidate('ui.render')
+  const started = await $.clock.now()
   let ok = false
+  let note = ''
   try {
     const r = await $.process.run([AWS_CLI, 'sso', 'login', '--profile', profile], { timeoutMs: AWS_LOGIN_MS })
     ok = r.exitCode === 0
-  } catch {}
-  $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish (timed out, cancelled or failed)')
+    if (!ok) {
+      // first line of what the CLI said, with any URL (it can carry a one-time code) dropped
+      const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+    }
+  } catch (err) {
+    // rejects when it cannot start, or was still running at the timeout
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+  }
+  const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  aws.lastLogin = { ok, secs, note }
+  $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   aws.status = 'unknown'
   await checkAws($, true) // ask AWS, rather than trust the exit code
 }
@@ -703,6 +717,9 @@ export function register(on) {
         : aws.status === 'error'
           ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Could not reach AWS (network, or the CLI failed). Login state is unknown.'] })]]
           : []),
+      ...(aws.lastLogin && !aws.lastLogin.ok && aws.status !== 'ok' && aws.status !== 'logging'
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Last login attempt ended after ' + aws.lastLogin.secs + 's: ' + (aws.lastLogin.note || 'no detail')] })]]
+        : []),
       ...(aws.status === 'expired' || aws.status === 'error' || aws.status === 'logging'
         ? [
             [
