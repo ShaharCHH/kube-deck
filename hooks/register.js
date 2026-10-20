@@ -17,6 +17,9 @@ const AWS_LOGIN_MS = 10 * 60000
 const KUBE_LOGIN_MS = 10 * 60000
 // API URL typed in the panel: https, a host name, optional port. It ends up in a command line.
 const KUBE_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/
+// SSO start URL and region typed in the panel; both end up in ~/.aws/config and on a command line.
+const AWS_SSO_URL_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(\/[A-Za-z0-9_.\/-]*)?$/
+const AWS_REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/
 const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 // Approve-all switches itself off this many minutes after it was turned on.
 const APPROVE_MINUTES = 15
@@ -64,6 +67,13 @@ let kubeLoginWanted = false
 let picked = {}
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
+// Adding a profile from an SSO start URL: what was typed, the state of that flow, and the
+// account/role pairs found after the browser login (account ids stay in memory, never drawn).
+// status: idle | logging
+let ssoUrlDraft = ''
+let ssoRegionDraft = ''
+let awsSso = { status: 'idle', choices: [], session: '', region: '', last: null }
+let awsSsoWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
 let todoKey = 'todos'
 let repoName = ''
@@ -237,6 +247,137 @@ async function loginAws($) {
   await checkAws($, true) // ask AWS, rather than trust the exit code
 }
 
+// ---- add an AWS profile from an SSO start URL
+// aws configure sso is interactive, so the panel does its steps itself: add an [sso-session]
+// block to ~/.aws/config, `aws sso login --sso-session` (browser), list the accounts and roles
+// the fresh token can use, and write the one profile you pick. It only ever appends to
+// ~/.aws/config (a copy of the original is kept once, as config.bak-kube-deck).
+async function appendAwsConfig($, home, block) {
+  const path = home + '/.aws/config'
+  let text = ''
+  try {
+    text = String(await $.fs.read(path))
+  } catch {}
+  if (text && !(await $.fs.exists(path + '.bak-kube-deck'))) await $.fs.write(path + '.bak-kube-deck', text)
+  await $.fs.write(path, text + (text && !text.endsWith('\n') ? '\n' : '') + (text ? '\n' : '') + block)
+}
+
+// The newest unexpired SSO token for this start URL, from the CLI's own cache.
+async function findSsoToken($, home, startUrl) {
+  const norm = (u) => String(u ?? '').replace(/[#/]+$/, '')
+  const now = await $.clock.now()
+  let best = null
+  try {
+    for (const f of await $.fs.list(home + '/.aws/sso/cache')) {
+      if (!f.name.endsWith('.json')) continue
+      try {
+        const j = JSON.parse(String(await $.fs.read(home + '/.aws/sso/cache/' + f.name)))
+        if (j.accessToken && norm(j.startUrl) === norm(startUrl) && Date.parse(j.expiresAt) > now) {
+          if (!best || Date.parse(j.expiresAt) > Date.parse(best.expiresAt)) best = j
+        }
+      } catch {}
+    }
+  } catch {}
+  return best?.accessToken ?? ''
+}
+
+// Accounts and roles the token can use. The token goes on the command line for the length of
+// these calls (the CLI offers no other way); other processes of yours could see it until they end.
+async function listSsoChoices($, token, region) {
+  const call = async (argv) => {
+    const r = await $.process.run([AWS_CLI, ...argv, '--access-token', token, '--region', region, '--output', 'json'], { timeoutMs: 20000 })
+    if (r.exitCode !== 0) throw new Error('exit ' + r.exitCode)
+    return JSON.parse(r.stdout)
+  }
+  const choices = []
+  for (const a of ((await call(['sso', 'list-accounts'])).accountList ?? []).slice(0, 40)) {
+    if (!/^\d{12}$/.test(a.accountId ?? '')) continue
+    for (const r of (await call(['sso', 'list-account-roles', '--account-id', a.accountId])).roleList ?? []) {
+      if (AWS_PROFILE_RE.test(r.roleName ?? '')) choices.push({ accountId: a.accountId, accountName: String(a.accountName ?? a.accountId), roleName: r.roleName })
+    }
+  }
+  return choices
+}
+
+async function loginAwsSso($, typedUrl, typedRegion) {
+  let url = String(typedUrl || ssoUrlDraft || '').trim()
+  if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
+  const region = String(typedRegion || ssoRegionDraft || '').trim()
+  const bad = !AWS_SSO_URL_RE.test(url)
+    ? 'Not a usable SSO start URL. Type it like mycompany.awsapps.com/start (https only).'
+    : !AWS_REGION_RE.test(region)
+      ? 'Type the SSO region, like us-east-1 (where Identity Center lives).'
+      : ''
+  if (bad) {
+    awsSso = { ...awsSso, status: 'idle', last: { ok: false, secs: null, note: bad } }
+    $.ui.invalidate('ui.render')
+    return $.ui.toast(bad)
+  }
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {}
+  if (!home) return $.ui.toast('Cannot add a profile: HOME is not set')
+
+  const session = 'kube-deck-' + /^https:\/\/([^/]+)/.exec(url)[1].replace(/[^A-Za-z0-9]+/g, '-')
+  awsSso = { status: 'logging', choices: [], session, region, last: null }
+  $.ui.invalidate('ui.render')
+  const started = await $.clock.now()
+  let note = ''
+  let choices = []
+  try {
+    let text = ''
+    try {
+      text = String(await $.fs.read(home + '/.aws/config'))
+    } catch {}
+    if (!parseAwsConfig(text)['sso-session ' + session]) {
+      await appendAwsConfig($, home, '[sso-session ' + session + ']\nsso_start_url = ' + url + '\nsso_region = ' + region + '\nsso_registration_scopes = sso:account:access\n')
+    }
+    const r = await $.process.run([AWS_CLI, 'sso', 'login', '--sso-session', session], { timeoutMs: AWS_LOGIN_MS })
+    if (r.exitCode !== 0) {
+      const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+    } else {
+      const token = await findSsoToken($, home, url)
+      if (!token) note = 'logged in, but no SSO token was found in ~/.aws/sso/cache'
+      else choices = await listSsoChoices($, token, region)
+      if (!note && choices.length === 0) note = 'logged in, but no accounts or roles are available to you'
+    }
+  } catch (err) {
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+  }
+  const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  awsSso = { status: 'idle', choices, session, region, last: note ? { ok: false, secs, note } : { ok: true, secs, note: '' } }
+  if (!note) {
+    ssoUrlDraft = ''
+    $.ui.toast('Signed in. Pick the account and role to add as a profile.')
+  } else {
+    $.ui.toast('AWS SSO login did not finish after ' + secs + 's (' + note + ')')
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// Writes the profile for a picked account/role (unless it exists) and switches to it.
+async function addSsoProfile($, index) {
+  const c = awsSso.choices[Number(index)]
+  if (!c) return
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {}
+  if (!home) return
+  const name = (c.accountName + '-' + c.roleName).replace(/[^A-Za-z0-9_.@+=,-]+/g, '-').replace(/^[^A-Za-z0-9_]+/, '')
+  if (!AWS_PROFILE_RE.test(name)) return $.ui.toast('Cannot make a profile name from that account')
+  await resolveAws($)
+  if (!awsProfiles.includes(name)) {
+    await appendAwsConfig($, home, '[profile ' + name + ']\nsso_session = ' + awsSso.session + '\nsso_account_id = ' + c.accountId + '\nsso_role_name = ' + c.roleName + '\nregion = ' + awsSso.region + '\n')
+    await resolveAws($)
+  }
+  awsSso = { ...awsSso, choices: [] }
+  await switchAws($, name)
+  $.ui.toast('Profile ' + name + ' added to ~/.aws/config and selected')
+}
+
 // ---- the dropdowns: switch AWS profile / kubeconfig for this session
 // `$.env.set` changes the variable for this process and everything it starts later, which
 // includes the shell commands Claude runs. Nothing on disk changes (no `oc config use-context`,
@@ -277,7 +418,9 @@ function pickedPrefix() {
 
 // Only values the dropdown offered are accepted, never free text.
 async function switchAws($, name) {
-  if (!awsProfiles.includes(name) || name === aws.profile) return
+  // "already selected" only counts once it has been exported: a profile the panel shows because
+  // it is the only one in ~/.aws/config is not set in Claude's shell until it is picked.
+  if (!awsProfiles.includes(name) || (name === aws.profile && picked.AWS_PROFILE === name)) return
   const r = await $.env.set('AWS_PROFILE', name)
   if (r?.deny) return $.ui.toast('Could not switch AWS profile: ' + r.deny)
   picked.AWS_PROFILE = name
@@ -541,6 +684,11 @@ export function register(on) {
       immediate: true,
     })
     await $.command.register({
+      name: 'aws-sso-login',
+      description: 'Add an AWS profile from an SSO start URL: /aws-sso-login mycompany.awsapps.com/start us-east-1 (browser login, then pick account/role in the panel)',
+      immediate: true,
+    })
+    await $.command.register({
       name: 'kube-login',
       description: 'Log in to a cluster in the browser: /kube-login https://api.mycluster.example.com:6443 (no URL = the current cluster)',
       immediate: true,
@@ -586,6 +734,10 @@ export function register(on) {
         if (kubeLoginWanted) {
           kubeLoginWanted = false
           await loginKube($)
+        }
+        if (awsSsoWanted) {
+          awsSsoWanted = false
+          await loginAwsSso($)
         }
         if (awsLoginWanted) {
           awsLoginWanted = false
@@ -729,6 +881,16 @@ export function register(on) {
     if (!aws.profile) return { text: 'no AWS profile found (set AWS_PROFILE, or put one in .aws-profile)' }
     await loginAws($)
     return { text: 'aws: ' + aws.profile + ' (' + aws.status + ')' }
+  })
+
+  on('command.run', { command: 'aws-sso-login' }, async ($, e) => {
+    const [url, region] = String(e.args ?? '').trim().split(/\s+/)
+    await loginAwsSso($, url, region)
+    return {
+      text: awsSso.last?.ok
+        ? awsSso.choices.length + ' account/role(s) found: pick one in the AWS card'
+        : 'AWS SSO login: ' + (awsSso.last?.note || 'nothing happened'),
+    }
   })
 
   on('command.run', { command: 'kube-login' }, async ($, e) => {
@@ -910,11 +1072,18 @@ export function register(on) {
       checking: Text({ color: THEME.muted, children: ['… checking'] }),
       logging: Text({ color: THEME.accent, children: ['… logging in'] }),
       unknown: Text({ color: THEME.muted, children: ['… not checked'] }),
+      none: Text({ color: THEME.muted, children: ['no profile'] }),
+    }
+    const startAwsSso = () => {
+      if (awsSso.status === 'logging' || awsSsoWanted) return
+      awsSsoWanted = true
+      awsSso = { ...awsSso, status: 'logging', choices: [], last: null }
+      $.ui.invalidate('ui.render')
     }
     const awsColor = aws.status === 'logging' ? THEME.accent : aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
     const awsCard = card('AWS', AWS_BADGE[aws.status], awsColor, [
       [
-        field('profile', aws.profile, THEME.text),
+        field('profile', aws.profile || '(none)', aws.profile ? THEME.text : THEME.muted),
         ...(aws.region ? [field('region', aws.region, THEME.text)] : []),
         ...(aws.role ? [field('role', aws.role, THEME.text)] : []),
         ...(aws.checkedAt ? [field('checked', hhmm(aws.checkedAt), THEME.muted)] : []),
@@ -959,14 +1128,64 @@ export function register(on) {
           ]
         : []),
       [
+        Input({
+          key: 'aws-sso-url',
+          label: 'sso',
+          placeholder: 'mycompany.awsapps.com/start',
+          value: ssoUrlDraft,
+          submitLabel: 'next',
+          onInput: (value) => {
+            ssoUrlDraft = value
+          },
+          onSubmit: () => {},
+        }),
+        Input({
+          key: 'aws-sso-region',
+          label: 'region',
+          placeholder: 'SSO region, like us-east-1',
+          value: ssoRegionDraft,
+          submitLabel: 'log in',
+          onInput: (value) => {
+            ssoRegionDraft = value
+          },
+          onSubmit: () => startAwsSso(),
+        }),
         Button({
-          key: 'aws-recheck',
-          label: '↻  Recheck',
-          variant: 'secondary',
-          hover: { scope: 'hv-aws', color: THEME.onColor, backgroundColor: THEME.accent },
-          onPress: () => checkAws($, true),
+          key: 'aws-sso-login',
+          label: awsSso.status === 'logging' ? '…  Approve in your browser' : '▶  Add profile via SSO',
+          variant: 'primary',
+          hover: { scope: 'hv-aws-sso', color: THEME.onColor, backgroundColor: THEME.accent },
+          onPress: () => startAwsSso(),
         }),
       ],
+      ...(awsSso.choices.length > 0
+        ? [
+            [
+              Select({
+                key: 'aws-sso-pick',
+                label: 'account',
+                options: awsSso.choices.map((c, i) => ({ value: String(i), label: c.accountName + ' · ' + c.roleName })),
+                onSelect: (value) => addSsoProfile($, value),
+              }),
+            ],
+          ]
+        : []),
+      ...(awsSso.last && !awsSso.last.ok && awsSso.status !== 'logging'
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: [awsSso.last.secs == null ? awsSso.last.note : 'SSO login ended after ' + awsSso.last.secs + 's: ' + awsSso.last.note] })]]
+        : []),
+      ...(aws.profile
+        ? [
+            [
+              Button({
+                key: 'aws-recheck',
+                label: '↻  Recheck',
+                variant: 'secondary',
+                hover: { scope: 'hv-aws', color: THEME.onColor, backgroundColor: THEME.accent },
+                onPress: () => checkAws($, true),
+              }),
+            ],
+          ]
+        : []),
     ])
 
     // ---- guard
@@ -1153,8 +1372,8 @@ export function register(on) {
 
     const footer = Text({ color: THEME.muted, children: ['/deck close  ·  ctrl+x tab focuses'] })
 
-    // The cluster card (it holds the login) and the todo card always show; the AWS card whenever
-    // a profile resolves. The guard and command cards appear once a cluster is detected, a
+    // The cluster card (it holds the login), the AWS card (it holds the SSO setup) and the todo
+    // card always show. The guard and command cards appear once a cluster is detected, a
     // cluster command has run, or approve-all is on. The guard itself never depends on what is
     // drawn: it acts on every cluster command either way.
     const showCluster = cluster.known || activity.length > 0 || armed || kubeconfigs.length > 0 || kubeLogin.status === 'logging'
@@ -1164,7 +1383,7 @@ export function register(on) {
       children: [
         Text({ bold: true, color: THEME.brand, children: ['◆ kube-deck'] }),
         clusterCard, // always: it holds the cluster login
-        ...(aws.profile ? [awsCard] : []),
+        awsCard, // always: it holds the SSO profile setup
         ...(showCluster ? [guardCard] : []),
         todoCard,
         ...(doneCard ? [doneCard] : []),
