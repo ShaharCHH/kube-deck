@@ -289,9 +289,14 @@ async function switchKubeconfig($, path) {
 // so no kubeconfig has to exist first and no other file is touched. No password or token passes
 // through the panel. Logging in again to the cluster already in use refreshes that same file.
 async function loginKube($, typed) {
-  const url = String(typed || kubeServerDraft || cluster.server || '').trim().replace(/\/+$/, '')
+  // "api.x.example.com:6443" works too: https:// is added when no scheme was typed
+  let url = String(typed || kubeServerDraft || cluster.server || '').trim().replace(/\/+$/, '')
+  if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
   if (!KUBE_SERVER_RE.test(url)) {
-    return $.ui.toast('Type the cluster API URL first, like https://api.mycluster.example.com:6443')
+    // on the card, not only a toast: a toast is easy to miss
+    kubeLogin = { status: 'idle', last: { ok: false, secs: null, note: 'Not a usable cluster URL. Type it like api.mycluster.example.com:6443 (https only).' } }
+    $.ui.invalidate('ui.render')
+    return $.ui.toast('Not a usable cluster URL (use https://host:port)')
   }
   let home = ''
   try {
@@ -856,7 +861,7 @@ export function register(on) {
             Input({
               key: 'kube-server',
               label: 'api',
-              placeholder: cluster.server ? 'API URL (empty = this cluster)' : 'https://api.mycluster.example.com:6443',
+              placeholder: cluster.server ? 'API URL (empty = this cluster)' : 'api.mycluster.example.com:6443',
               value: kubeServerDraft,
               submitLabel: 'log in',
               onInput: (value) => {
@@ -875,7 +880,7 @@ export function register(on) {
         }),
       ],
       ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.status !== 'logging'
-        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['Last login attempt ended after ' + kubeLogin.last.secs + 's: ' + (kubeLogin.last.note || 'no detail')] })]]
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: [kubeLogin.last.secs == null ? kubeLogin.last.note : 'Last login attempt ended after ' + kubeLogin.last.secs + 's: ' + (kubeLogin.last.note || 'no detail')] })]]
         : []),
     ])
 

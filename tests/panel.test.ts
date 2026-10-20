@@ -330,6 +330,13 @@ test('cluster login: runs oc login --web into a file of its own, then switches t
   expect(env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig') // and the session now uses it
 })
 
+test('cluster login: a host:port typed without https:// gets it added', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await $.command.run({ command: 'kube-login', args: 'api.sno.x.example.com:6443' })
+  expect(ran[0].argv[3]).toBe('--server=https://api.sno.x.example.com:6443')
+})
+
 test('cluster login: a URL that is not a plain https host runs nothing', async ($, on) => {
   const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
   const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
@@ -338,6 +345,9 @@ test('cluster login: a URL that is not a plain https host runs nothing', async (
   }
   expect(ran.length).toBe(0)
   expect(env.KUBECONFIG).toBe('')
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /Not a usable cluster URL/ })).toBeDefined() // shown on the card
+  await ui.unmount()
 })
 
 test('cluster login: a failed login says why, drops URLs, and does not switch', async ($, on) => {
