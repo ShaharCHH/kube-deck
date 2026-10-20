@@ -1,0 +1,12 @@
+{
+  "name": "kube-deck",
+  "owner": { "name": "Shahar" },
+  "description": "kube-deck: a safety net and control panel for Kubernetes / OpenShift and AWS work in Claude Code",
+  "plugins": [
+    {
+      "name": "kube-deck",
+      "source": "./",
+      "description": "Asks before cluster changes on prod, hides secrets from output, keeps an audit log, and adds a panel to switch and log in to AWS profiles and clusters."
+    }
+  ]
+}

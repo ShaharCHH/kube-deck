@@ -88,7 +88,7 @@ test('prod wins over the non-prod list (sandbox-prod is asked)', async ($, on) =
 })
 
 test('a name on the non-prod list is trusted (digits and dashes around it are fine)', async ($, on) => {
-  const { seen } = world(on, { kubeconfig: '/k/sno-sandbox2938-opentlc-com.kubeconfig' })
+  const { seen } = world(on, { kubeconfig: '/k/sno-sandbox1234-opentlc-com.kubeconfig' })
   await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
   expect(seen.asks.length).toBe(0)
   expect(seen.audit.at(-1).outcome).toBe('non-prod')
