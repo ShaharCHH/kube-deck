@@ -174,7 +174,7 @@ Claude can add to it on its own: the tool `mcp__kube-deck__todo` (list / add / d
 
 ## Configuration
 
-Everything is at the top of `hooks/register.js`:
+Everything is in `hooks/config.js`:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -203,9 +203,16 @@ claude --plugin-dir .             # run it; saving a file hot-reloads
 
 | File | Role |
 | --- | --- |
-| `hooks/register.js` | All engine wiring: panel, guard, logins, audit, to-do. |
+| `hooks/register.js` | The wiring only: session start, prompts, slash commands, timers, the to-do tool. |
+| `hooks/config.js` | The settings you may edit (prod / non-prod patterns, timeouts, colours). |
+| `hooks/guard.js` | The Bash guard: asks on prod, redacts output, writes the audit log. |
+| `hooks/panel.js` | Draws the panel. |
+| `hooks/cluster.js` | Cluster state, the kubeconfig dropdown and the browser cluster login. |
+| `hooks/aws.js` | AWS profile state, login, the profile dropdown and adding a profile from an SSO URL. |
+| `hooks/audit.js` | The recent-commands feed, the audit log, output redaction and the approval question. |
+| `hooks/approve.js`, `todos.js`, `picked.js`, `shared.js` | Approve-all, the to-do list, what was picked in the panel (kept in session state), and state shared by the panel and the logins. |
 | `hooks/classify.js` | Pure: decides whether a command touches a cluster, changes it, or sets its own target. |
-| `hooks/redact.js` | Pure: masks Secret data in output. |
+| `hooks/redact.js` | Pure: masks Secret data in output and secrets in command lines. |
 | `types/index.d.ts` | The `$.state` contract (what was picked in the panel). |
 | `tests/` | Plain-node tests for the pure modules, engine tests for the rest. |
 

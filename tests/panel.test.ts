@@ -451,6 +451,28 @@ test('cluster login: a host:port typed without https:// gets it added', async ($
   expect(ran[0].argv[3]).toBe('--server=https://api.sno.x.example.com:6443')
 })
 
+// The panel and the logins live in different files and share the typed text and the "login wanted"
+// flags through objects: this walks that path.
+test('panel: typed URLs reach the logins, and the login buttons queue them', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  await ui.input({ key: 'kube-server', text: 'api.sno.x.example.com:6443', kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' })
+  expect(JSON.stringify(await ui.find({ key: 'kube-login' }))).toContain('Approve in your browser')
+  expect(ran.length).toBe(0) // queued: the 1s timer runs it, not the press
+  await $.command.run({ command: 'kube-login', args: '' }) // no URL typed here: it uses the panel's field
+  expect(ran[0].argv).toContain('--server=https://api.sno.x.example.com:6443')
+
+  await ui.input({ key: 'aws-sso-url', text: 'mycompany.awsapps.com/start', kind: 'change' } as any)
+  await ui.input({ key: 'aws-sso-region', text: 'us-east-1', kind: 'change' } as any)
+  await ui.press({ key: 'aws-sso-login' })
+  expect(JSON.stringify(await ui.find({ key: 'aws-sso-login' }))).toContain('Approve in your browser')
+  await ui.unmount()
+})
+
 test('cluster login: a URL that is not a plain https host runs nothing', async ($, on) => {
   const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
   const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
