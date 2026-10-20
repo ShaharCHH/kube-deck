@@ -52,7 +52,7 @@ test('with a cluster: all cards draw on terminal and desktop, and the controls w
   }
 })
 
-test('without a cluster: only the todo card draws', async ($, on) => {
+test('without a cluster: the todo and cluster-login cards draw, not the guard', async ($, on) => {
   setup(on, false)
   await $.command.run({ command: 'ctx', args: '' })
 
@@ -213,5 +213,306 @@ test('AWS card: a login that ends early says how and why, and drops URLs from th
   expect(note).toContain('<url>')
   expect(note).not.toContain('SECRET')
   expect(await ui.find({ key: 'aws-login' })).toBeDefined() // still expired: the button stays
+  await ui.unmount()
+})
+
+// A fake environment that remembers `$.env.set`, so a switch can be seen taking effect.
+function switchWorld(on: any, env: Record<string, string>) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    if (e.value === undefined) delete env[e.name]
+    else env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  const kc = 'apiVersion: v1\nclusters: []\n'
+  on('fs.list', (_$: any, e: any) => ({
+    value: String(e.path).endsWith('/.kube')
+      ? [
+          { name: 'sandbox.kubeconfig', kind: 'file' },
+          { name: 'prod-eu.kubeconfig', kind: 'file' },
+          { name: 'cache', kind: 'dir' },
+          { name: 'kuberc', kind: 'file' },
+        ]
+      : [],
+  }))
+  on('fs.read', (_$: any, e: any) => ({
+    value: String(e.path).endsWith('/.aws/config')
+      ? '[default]\nregion = us-east-1\n[profile dev]\nregion = eu-west-1\n[profile prod]\nregion = eu-west-1\n'
+      : String(e.path).endsWith('kuberc')
+        ? 'not a kubeconfig'
+        : kc,
+  }))
+  on('process.run', (_$: any, e: any) =>
+    e.argv[0] === 'aws'
+      ? { value: { exitCode: 0, stdout: JSON.stringify({ Arn: 'arn:aws:iam::1:user/' + e.argv[3] }), stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: 'oc: not found' } },
+  )
+}
+
+test('AWS dropdown: lists the profiles, and a pick sets AWS_PROFILE and re-checks', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }
+  switchWorld(on, env)
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  const sel = JSON.stringify(await ui.find({ key: 'aws-profile-select' }))
+  for (const name of ['default', 'dev', 'prod']) expect(sel).toContain(name)
+
+  await ui.select({ key: 'aws-profile-select', value: 'prod' })
+  expect(env.AWS_PROFILE).toBe('prod')
+  expect(await ui.find({ type: 'Text', text: /prod/ })).toBeDefined()
+
+  // a value the dropdown never offered is ignored
+  await ui.select({ key: 'aws-profile-select', value: '--endpoint-url=http://evil' })
+  expect(env.AWS_PROFILE).toBe('prod')
+  await ui.unmount()
+})
+
+test('kubeconfig dropdown: lists kubeconfig files only; a pick sets KUBECONFIG, re-judges prod, drops approve-all', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '/home/t/.kube/sandbox.kubeconfig', HOME: '/home/t' }
+  switchWorld(on, env)
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  const sel = JSON.stringify(await ui.find({ key: 'kubeconfig-select' }))
+  expect(sel).toContain('sandbox.kubeconfig')
+  expect(sel).toContain('prod-eu.kubeconfig')
+  expect(sel).not.toContain('kuberc') // not a kubeconfig
+  expect(sel).not.toContain('cache') // a directory
+
+  await ui.press({ key: 'approve-all' })
+  expect(JSON.stringify(await ui.find({ key: 'approve-all' }))).toContain('ON')
+
+  await ui.select({ key: 'kubeconfig-select', value: '/home/t/.kube/prod-eu.kubeconfig' })
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/prod-eu.kubeconfig')
+  expect(JSON.stringify(await ui.find({ key: 'approve-all' }))).not.toContain('ON') // switched off by the move
+
+  await ui.select({ key: 'kubeconfig-select', value: '/etc/passwd' })
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/prod-eu.kubeconfig')
+  await ui.unmount()
+})
+
+function kubeLoginWorld(on: any, env: Record<string, string>, loginResult: { exitCode: number; stderr: string }) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  let created = false
+  on('fs.list', () => ({ value: created ? [{ name: 'sno-x-example-com.kubeconfig', kind: 'file' }] : [] }))
+  on('fs.read', () => ({ value: 'apiVersion: v1\nclusters: []\n' }))
+  const ran: any[] = []
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] === 'oc' && e.argv[1] === 'login') {
+      ran.push(e)
+      created = loginResult.exitCode === 0
+      return { value: { exitCode: loginResult.exitCode, stdout: '', stderr: loginResult.stderr } }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
+  })
+  return ran
+}
+
+test('cluster login: runs oc login --web into a file of its own, then switches to it', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await $.command.run({ command: 'kube-login', args: 'https://api.sno.x.example.com:6443' })
+
+  expect(ran.length).toBe(1)
+  expect(ran[0].argv).toEqual(['oc', 'login', '--web', '--server=https://api.sno.x.example.com:6443'])
+  expect(ran[0].init.env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig') // its own file
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig') // and the session now uses it
+})
+
+test('cluster login: a host:port typed without https:// gets it added', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await $.command.run({ command: 'kube-login', args: 'api.sno.x.example.com:6443' })
+  expect(ran[0].argv[3]).toBe('--server=https://api.sno.x.example.com:6443')
+})
+
+test('cluster login: a URL that is not a plain https host runs nothing', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  for (const bad of ['--token=abc', 'http://api.x.example.com:6443', 'https://x.example.com; rm -rf ~', 'https://x/../y']) {
+    await $.command.run({ command: 'kube-login', args: bad })
+  }
+  expect(ran.length).toBe(0)
+  expect(env.KUBECONFIG).toBe('')
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /Not a usable cluster URL/ })).toBeDefined() // shown on the card
+  await ui.unmount()
+})
+
+test('cluster login: a failed login says why, drops URLs, and does not switch', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/old.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  kubeLoginWorld(on, env, { exitCode: 1, stderr: 'Open https://oauth.example/?code=SECRET to sign in' })
+  await $.command.run({ command: 'kube-login', args: 'https://api.sno.x.example.com:6443' })
+  const ui = await mount($, 'terminal')
+  const note = JSON.stringify(await ui.find({ type: 'Text', text: /Last login attempt ended/ }))
+  expect(note).toContain('<url>')
+  expect(note).not.toContain('SECRET')
+  expect(env.KUBECONFIG).toBe('/k/old.kubeconfig')
+  expect(await ui.find({ key: 'kube-login' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('after a pick, Claude\'s Bash commands carry the picked AWS profile and kubeconfig', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '/home/t/.kube/sandbox.kubeconfig', HOME: '/home/t' }
+  switchWorld(on, env)
+  const ran: string[] = []
+  on('tool.call', { tool: 'Bash' } as any, (_$: any, e: any) => {
+    ran.push(e.command)
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+
+  // nothing picked yet: commands pass through untouched
+  await $.tool.call({ tool: 'Bash', command: 'aws sts get-caller-identity' } as any)
+  expect(ran.at(-1)).toBe('aws sts get-caller-identity')
+
+  const ui = await mount($, 'terminal')
+  await ui.select({ key: 'aws-profile-select', value: 'prod' })
+  await $.tool.call({ tool: 'Bash', command: 'aws sts get-caller-identity' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='prod'; aws sts get-caller-identity")
+
+  await ui.select({ key: 'kubeconfig-select', value: '/home/t/.kube/prod-eu.kubeconfig' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='prod'; export KUBECONFIG='/home/t/.kube/prod-eu.kubeconfig'; ls")
+  await ui.unmount()
+})
+
+// A fake ~/.aws: files in a map, and an aws CLI that logs in (writes a token to the cache),
+// lists accounts and roles, and records every call.
+function ssoWorld(on: any, opts: { writeToken?: boolean } = {}) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  const env: Record<string, string> = { HOME: '/home/t', AWS_PROFILE: '', KUBECONFIG: '' }
+  const files: Record<string, string> = { '/home/t/.aws/config': '[default]\nregion = us-east-1\n' }
+  const aws: string[][] = []
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.read', (_$: any, e: any) => {
+    if (!(e.path in files)) throw new Error('ENOENT')
+    return { value: files[e.path] }
+  })
+  on('fs.write', (_$: any, e: any) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('fs.exists', (_$: any, e: any) => ({ value: e.path in files }))
+  on('fs.list', (_$: any, e: any) => ({
+    value: Object.keys(files)
+      .filter((f) => f.startsWith(e.path + '/'))
+      .map((f) => ({ name: f.slice(e.path.length + 1), kind: 'file' })),
+  }))
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] !== 'aws') return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
+    aws.push(e.argv)
+    if (e.argv[1] === 'sso' && e.argv[2] === 'login') {
+      if (opts.writeToken !== false) {
+        files['/home/t/.aws/sso/cache/abc.json'] = JSON.stringify({
+          startUrl: 'https://mycompany.awsapps.com/start', accessToken: 'TOKEN123', expiresAt: '2099-01-01T00:00:00Z',
+        })
+      }
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
+    if (e.argv[2] === 'list-accounts') {
+      return { value: { exitCode: 0, stdout: JSON.stringify({ accountList: [{ accountId: '111122223333', accountName: 'Workload' }] }), stderr: '' } }
+    }
+    if (e.argv[2] === 'list-account-roles') {
+      return { value: { exitCode: 0, stdout: JSON.stringify({ roleList: [{ roleName: 'Admin' }] }), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: JSON.stringify({ Arn: 'arn:aws:sts::1:assumed-role/Admin/me' }), stderr: '' } }
+  })
+  return { env, files, aws }
+}
+
+test('AWS SSO: a start URL and region log in, list accounts, and the picked one becomes a profile', async ($, on) => {
+  const { env, files, aws } = ssoWorld(on)
+  await $.command.run({ command: 'aws-sso-login', args: 'mycompany.awsapps.com/start us-east-1' })
+
+  const cfg = files['/home/t/.aws/config']
+  expect(cfg).toContain('[default]') // what was there is kept
+  expect(cfg).toContain('[sso-session kube-deck-mycompany-awsapps-com-start]')
+  expect(cfg).toContain('sso_start_url = https://mycompany.awsapps.com/start')
+  expect(files['/home/t/.aws/config.bak-kube-deck']).toBe('[default]\nregion = us-east-1\n') // one-time copy
+  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-mycompany-awsapps-com-start')).toBe(true)
+  const listed = aws.find((a) => a[2] === 'list-accounts')!
+  expect(listed).toContain('TOKEN123')
+
+  const ui = await mount($, 'terminal')
+  const pick = JSON.stringify(await ui.find({ key: 'aws-sso-pick' }))
+  expect(pick).toContain('Workload · Admin')
+  expect(JSON.stringify(await ui.find({ key: 'aws-sso-pick' }))).not.toContain('111122223333') // account id never drawn
+
+  await ui.select({ key: 'aws-sso-pick', value: '0' })
+  const after = files['/home/t/.aws/config']
+  expect(after).toContain('[profile Workload-Admin]')
+  expect(after).toContain('sso_session = kube-deck-mycompany-awsapps-com-start')
+  expect(after).toContain('sso_account_id = 111122223333')
+  expect(after).toContain('sso_role_name = Admin')
+  expect(env.AWS_PROFILE).toBe('Workload-Admin') // and the session now uses it
+  expect(await ui.find({ key: 'aws-sso-pick' })).toBeUndefined()
+  expect(JSON.stringify(await ui.find({ type: 'Text', text: /Workload-Admin/ }))).not.toContain('111122223333')
+  await ui.unmount()
+})
+
+test('AWS SSO: a URL or region that is not plain writes nothing and runs nothing', async ($, on) => {
+  const { files, aws } = ssoWorld(on)
+  for (const args of ['--endpoint-url=x us-east-1', 'http://x.awsapps.com/start us-east-1', 'x.awsapps.com/start; rm us-east-1', 'x.awsapps.com/start nowhere']) {
+    await $.command.run({ command: 'aws-sso-login', args })
+  }
+  expect(aws.length).toBe(0)
+  expect(files['/home/t/.aws/config']).toBe('[default]\nregion = us-east-1\n')
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /Type the SSO region|Not a usable SSO start URL/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('AWS SSO: the issuer URL works; text stuck on its end (a region) is refused; a clashing session is not reused', async ($, on) => {
+  const { files, aws } = ssoWorld(on)
+  // the issuer URL with the region glued on, as it happened once
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224il-central-1 il-central-1' })
+  expect(aws.length).toBe(0)
+  expect(files['/home/t/.aws/config']).toBe('[default]\nregion = us-east-1\n')
+
+  // a session of that name already there with another URL: refused, nothing run
+  const good = 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224'
+  files['/home/t/.aws/config'] += '[sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224]\nsso_start_url = https://other.example.com/start\n'
+  await $.command.run({ command: 'aws-sso-login', args: good + ' il-central-1' })
+  expect(aws.length).toBe(0)
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /different sso_start_url/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('AWS SSO: the issuer URL is accepted and logs in under its own session name', async ($, on) => {
+  const { files, aws } = ssoWorld(on)
+  files['/home/t/.aws/sso/cache/zzz.json'] = JSON.stringify({
+    startUrl: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224', accessToken: 'TOKEN9', expiresAt: '2099-01-01T00:00:00Z',
+  })
+  await $.command.run({ command: 'aws-sso-login', args: 'https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224 il-central-1' })
+  expect(aws.some((a) => a.join(' ') === 'aws sso login --sso-session kube-deck-identitycenter-amazonaws-com-ssoins-831605c23ec9a224')).toBe(true)
+  expect(files['/home/t/.aws/config']).toContain('sso_start_url = https://identitycenter.amazonaws.com/ssoins-831605c23ec9a224\n')
+})
+
+test('AWS SSO: a login that leaves no token says so and adds no profile', async ($, on) => {
+  const { files, aws } = ssoWorld(on, { writeToken: false })
+  await $.command.run({ command: 'aws-sso-login', args: 'mycompany.awsapps.com/start us-east-1' })
+  expect(aws.some((a) => a[2] === 'list-accounts')).toBe(false)
+  expect(files['/home/t/.aws/config']).not.toContain('[profile')
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /no SSO token was found/ })).toBeDefined()
   await ui.unmount()
 })
