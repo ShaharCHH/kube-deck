@@ -35,6 +35,32 @@ const cases = [
   ['oc delete pod "a;b"', true, true, false],
   ['oc label pod x "k=a|b"', true, true, false],
   ['oc get pods | grep "x|y"', true, false, false],
+  // commands that are not the first word of their piece
+  ['for p in a b; do oc delete pod $p; done', true, true, false],
+  ['for p in a b; do oc get pod $p; done', true, false, false],
+  ['if true; then oc delete pod x; fi', true, true, false],
+  ['while true; do oc get pods; sleep 1; done', true, false, false],
+  ['echo $(oc delete pod x)', true, true, false],
+  ['echo `oc delete pod x`', true, true, false],
+  ['(oc delete pod x)', true, true, false],
+  ['x=$(oc get pods -o name | head -1) && oc delete $x', true, true, false],
+  ['find . -name x -exec oc delete -f {} \\;', true, true, false],
+  ['find . -name x -exec oc get -f {} \\;', true, false, false],
+  ['eval "oc delete pod x"', true, true, false],
+  ['ssh bastion oc delete pod x', true, true, false],
+  ['ssh bastion "oc delete pod x"', true, true, false],
+  ['ssh bastion oc get pods', true, false, false],
+  ['ssh bastion uptime', false, false, false],
+  ['timeout 30 oc delete pod x', true, true, false],
+  ['caffeinate -i helm upgrade x y', true, true, false],
+  // jsonpath / selectors with parentheses stay reads
+  ["oc get pods -o jsonpath='{.items[?(@.x)].name}'", true, false, false],
+  ["oc get pods -l 'app in (a,b)'", true, false, false],
+  // login, logout and switching project change what later commands hit
+  ['oc login -u admin -p pw https://other.example.com:6443', true, true, false],
+  ['oc logout', true, true, false],
+  ['oc project other-ns', true, true, false],
+  ['oc whoami', true, false, false],
   // known false positive: oc text inside a quoted echo is read as a command (an extra prompt)
   ['echo "a; oc delete pod x"', true, true, false],
 ]
