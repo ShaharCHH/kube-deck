@@ -280,6 +280,16 @@ async function loginAws($) {
     note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
   }
   const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  if (aws.profile !== profile) {
+    // switched to another profile while the browser login was open: the result belongs to the old
+    // one, so say so in a toast and leave the profile on show alone
+    $.ui.toast(
+      ok
+        ? 'AWS login finished for ' + profile + ' (no longer the profile on show)'
+        : 'AWS login for ' + profile + ' did not finish after ' + secs + 's (' + (note || 'no detail') + ')',
+    )
+    return
+  }
   aws.lastLogin = { ok, secs, note }
   $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   aws.status = 'unknown'

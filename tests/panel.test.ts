@@ -328,6 +328,36 @@ test('a profile that comes from AWS_PROFILE itself is left alone', async ($, on)
   expect(ran.at(-1)).toBe('ls')
 })
 
+test('AWS login: switching profile while the browser login is open does not put its result on the new profile', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', () => ({ value: '[profile dev]\nregion = x\n[profile prod]\nregion = y\n' }))
+  let ui: any
+  on('process.run', async (_$: any, e: any) => {
+    if (e.argv[0] !== 'aws') return { value: { exitCode: 1, stdout: '', stderr: '' } }
+    if (e.argv[1] === 'sso') {
+      await ui.select({ key: 'aws-profile-select', value: 'prod' }) // the person picks another profile mid-login
+      return { value: { exitCode: 1, stdout: '', stderr: 'Error: browser window closed' } }
+    }
+    return { value: { exitCode: 255, stdout: '', stderr: 'Token has expired and refresh failed' } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+  ui = await mount($, 'terminal')
+  await $.command.run({ command: 'aws-login', args: '' }) // dev's login, ends after the switch
+  expect(env.AWS_PROFILE).toBe('prod')
+  // the failed login was dev's: prod must not show it
+  expect(await ui.find({ type: 'Text', text: /Last login attempt ended/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('AWS dropdown: lists the profiles, and a pick sets AWS_PROFILE and re-checks', async ($, on) => {
   const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }
   switchWorld(on, env)
