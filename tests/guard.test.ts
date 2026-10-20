@@ -1,4 +1,12 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as baseTest } from 'claude-code/testing'
+
+// Every test answers $.ui.toast, so a failing test's output is not buried in "no implementation
+// for ui.toast" lines.
+const test: typeof baseTest = ((name: string, body: any) =>
+  baseTest(name, ($: any, on: any) => {
+    on('ui.toast', () => ({ value: undefined }))
+    return body($, on)
+  })) as any
 
 const KUBECONFIG_JSON = JSON.stringify({
   clusters: [{ name: 'api-x', cluster: { server: 'https://api.x.example.com:6443' } }],
