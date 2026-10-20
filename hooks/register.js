@@ -43,6 +43,11 @@ let todos = []
 // status: none (no profile) | unknown | checking | logging | ok | expired | error
 // lastLogin: how the last Log in attempt ended ({ ok, secs, note }), kept so a failure explains itself.
 let aws = { profile: '', region: '', role: '', status: 'none', checkedAt: 0, lastLogin: null }
+// What the dropdowns offer: profile names from ~/.aws/config, kubeconfig files from ~/.kube.
+// `kubeconfig` is the file in use (first KUBECONFIG entry), so the dropdown can show it.
+let awsProfiles = []
+let kubeconfigs = []
+let kubeconfig = ''
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
@@ -139,6 +144,9 @@ async function resolveAws($) {
   try {
     if (home) sections = parseAwsConfig(await $.fs.read(home + '/.aws/config'))
   } catch {}
+  awsProfiles = Object.keys(sections)
+    .map((n) => (n === 'default' ? n : n.startsWith('profile ') ? n.slice('profile '.length).trim() : ''))
+    .filter((n) => AWS_PROFILE_RE.test(n))
   if (!profile) {
     const names = Object.keys(sections).filter((n) => n.startsWith('profile '))
     if (names.length === 1) profile = names[0].slice('profile '.length).trim()
@@ -213,6 +221,58 @@ async function loginAws($) {
   $.ui.toast(ok ? 'AWS login finished' : 'AWS login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   aws.status = 'unknown'
   await checkAws($, true) // ask AWS, rather than trust the exit code
+}
+
+// ---- the dropdowns: switch AWS profile / kubeconfig for this session
+// `$.env.set` changes the variable for this process and everything it starts later, which
+// includes the shell commands Claude runs. Nothing on disk changes (no `oc config use-context`,
+// no edit to ~/.aws/config), so closing the session puts everything back.
+async function discoverKubeconfigs($) {
+  let home = ''
+  let current = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+    current = ((await $.env.get('KUBECONFIG')) ?? '').split(':')[0]
+  } catch {}
+  const found = []
+  if (home) {
+    try {
+      for (const f of await $.fs.list(home + '/.kube')) {
+        if (f.kind === 'dir' || found.length >= 30) continue
+        // only files that read like a kubeconfig (~/.kube also holds caches and other tools' files)
+        try {
+          if (/^\s*(apiVersion|clusters|contexts):/m.test(String(await $.fs.read(home + '/.kube/' + f.name)).slice(0, 4000))) {
+            found.push(home + '/.kube/' + f.name)
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  if (current && !found.includes(current)) found.unshift(current)
+  kubeconfig = current
+  kubeconfigs = found.sort()
+}
+
+// Only values the dropdown offered are accepted, never free text.
+async function switchAws($, name) {
+  if (!awsProfiles.includes(name) || name === aws.profile) return
+  const r = await $.env.set('AWS_PROFILE', name)
+  if (r?.deny) return $.ui.toast('Could not switch AWS profile: ' + r.deny)
+  await resolveAws($) // reads the new AWS_PROFILE and resets what we knew about the old one
+  $.ui.toast('AWS profile is now ' + name + ' (commands Claude runs from now on)')
+  checkAws($, true).catch(() => {})
+}
+
+async function switchKubeconfig($, path) {
+  if (!kubeconfigs.includes(path) || path === kubeconfig) return
+  const r = await $.env.set('KUBECONFIG', path)
+  if (r?.deny) return $.ui.toast('Could not switch kubeconfig: ' + r.deny)
+  // an approve-all given for the old cluster must not carry over to the new one
+  const wasArmed = approveAll
+  if (wasArmed) await setApprove($, false)
+  kubeconfig = path
+  await refreshCluster($) // re-judges prod / non-prod for the new file
+  $.ui.toast('Kubeconfig is now ' + path.split('/').pop() + (wasArmed ? '; approve-all switched off' : ''))
 }
 
 // ---- approve-all with an expiry
@@ -432,6 +492,7 @@ export function register(on) {
     await loadTodos($)
     await refreshCluster($)
     await resolveAws($)
+    await discoverKubeconfigs($)
     // Count down approve-all and switch it off when time is up. Runs once a second but only
     // does anything while approve-all is on. (The timer stops when the module reloads.)
     $.clock.every(1000, async () => {
@@ -464,6 +525,7 @@ export function register(on) {
       await loadTodos($)
       await refreshCluster($)
       await resolveAws($)
+      await discoverKubeconfigs($)
     } catch {}
     return next(e)
   })
@@ -565,6 +627,7 @@ export function register(on) {
   on('command.run', { command: 'ctx' }, async ($) => {
     await refreshCluster($)
     await resolveAws($)
+    await discoverKubeconfigs($)
     return {
       text:
         (cluster.known ? cluster.name : 'no cluster found') +
@@ -648,7 +711,7 @@ export function register(on) {
   // Colors are theme keys (THEME, top of file), so the panel follows light/dark mode.
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
     const now = await $.clock.now()
     const armed = approveAll && now < approveUntil
 
@@ -693,6 +756,19 @@ export function register(on) {
     const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
       [field('project', cluster.namespace || 'default', THEME.text)],
+      ...(kubeconfigs.length > 0
+        ? [
+            [
+              Select({
+                key: 'kubeconfig-select',
+                label: 'kubeconfig',
+                options: kubeconfigs.map((f) => ({ value: f, label: f.split('/').pop() })),
+                value: kubeconfig || undefined,
+                onSelect: (value) => switchKubeconfig($, value),
+              }),
+            ],
+          ]
+        : []),
     ])
 
     // ---- aws: profile, region, signed-in role, and whether the login still works
@@ -712,6 +788,19 @@ export function register(on) {
         ...(aws.role ? [field('role', aws.role, THEME.text)] : []),
         ...(aws.checkedAt ? [field('checked', hhmm(aws.checkedAt), THEME.muted)] : []),
       ],
+      ...(awsProfiles.length > 1
+        ? [
+            [
+              Select({
+                key: 'aws-profile-select',
+                label: 'profile',
+                options: awsProfiles.map((n) => ({ value: n })),
+                value: aws.profile,
+                onSelect: (value) => switchAws($, value),
+              }),
+            ],
+          ]
+        : []),
       ...(aws.status === 'expired'
         ? [[Text({ color: THEME.danger, wrap: 'wrap', children: ['Press Log in, or run in a terminal: aws sso login --profile ' + aws.profile] })]]
         : aws.status === 'error'
@@ -937,7 +1026,7 @@ export function register(on) {
     // is detected, a cluster command has run, or approve-all is on; the AWS card whenever a
     // profile resolves. The guard itself never depends on what is drawn: it acts on every
     // cluster command either way.
-    const showCluster = cluster.known || activity.length > 0 || armed
+    const showCluster = cluster.known || activity.length > 0 || armed || kubeconfigs.length > 0
     return Box({
       flexDirection: 'column',
       gap: 1,

@@ -215,3 +215,82 @@ test('AWS card: a login that ends early says how and why, and drops URLs from th
   expect(await ui.find({ key: 'aws-login' })).toBeDefined() // still expired: the button stays
   await ui.unmount()
 })
+
+// A fake environment that remembers `$.env.set`, so a switch can be seen taking effect.
+function switchWorld(on: any, env: Record<string, string>) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    if (e.value === undefined) delete env[e.name]
+    else env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  const kc = 'apiVersion: v1\nclusters: []\n'
+  on('fs.list', (_$: any, e: any) => ({
+    value: String(e.path).endsWith('/.kube')
+      ? [
+          { name: 'sandbox.kubeconfig', kind: 'file' },
+          { name: 'prod-eu.kubeconfig', kind: 'file' },
+          { name: 'cache', kind: 'dir' },
+          { name: 'kuberc', kind: 'file' },
+        ]
+      : [],
+  }))
+  on('fs.read', (_$: any, e: any) => ({
+    value: String(e.path).endsWith('/.aws/config')
+      ? '[default]\nregion = us-east-1\n[profile dev]\nregion = eu-west-1\n[profile prod]\nregion = eu-west-1\n'
+      : String(e.path).endsWith('kuberc')
+        ? 'not a kubeconfig'
+        : kc,
+  }))
+  on('process.run', (_$: any, e: any) =>
+    e.argv[0] === 'aws'
+      ? { value: { exitCode: 0, stdout: JSON.stringify({ Arn: 'arn:aws:iam::1:user/' + e.argv[3] }), stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: 'oc: not found' } },
+  )
+}
+
+test('AWS dropdown: lists the profiles, and a pick sets AWS_PROFILE and re-checks', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '', HOME: '/home/t' }
+  switchWorld(on, env)
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  const sel = JSON.stringify(await ui.find({ key: 'aws-profile-select' }))
+  for (const name of ['default', 'dev', 'prod']) expect(sel).toContain(name)
+
+  await ui.select({ key: 'aws-profile-select', value: 'prod' })
+  expect(env.AWS_PROFILE).toBe('prod')
+  expect(await ui.find({ type: 'Text', text: /prod/ })).toBeDefined()
+
+  // a value the dropdown never offered is ignored
+  await ui.select({ key: 'aws-profile-select', value: '--endpoint-url=http://evil' })
+  expect(env.AWS_PROFILE).toBe('prod')
+  await ui.unmount()
+})
+
+test('kubeconfig dropdown: lists kubeconfig files only; a pick sets KUBECONFIG, re-judges prod, drops approve-all', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '/home/t/.kube/sandbox.kubeconfig', HOME: '/home/t' }
+  switchWorld(on, env)
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+
+  const sel = JSON.stringify(await ui.find({ key: 'kubeconfig-select' }))
+  expect(sel).toContain('sandbox.kubeconfig')
+  expect(sel).toContain('prod-eu.kubeconfig')
+  expect(sel).not.toContain('kuberc') // not a kubeconfig
+  expect(sel).not.toContain('cache') // a directory
+
+  await ui.press({ key: 'approve-all' })
+  expect(JSON.stringify(await ui.find({ key: 'approve-all' }))).toContain('ON')
+
+  await ui.select({ key: 'kubeconfig-select', value: '/home/t/.kube/prod-eu.kubeconfig' })
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/prod-eu.kubeconfig')
+  expect(JSON.stringify(await ui.find({ key: 'approve-all' }))).not.toContain('ON') // switched off by the move
+
+  await ui.select({ key: 'kubeconfig-select', value: '/etc/passwd' })
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/prod-eu.kubeconfig')
+  await ui.unmount()
+})
