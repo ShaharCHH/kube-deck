@@ -362,3 +362,28 @@ test('cluster login: a failed login says why, drops URLs, and does not switch', 
   expect(await ui.find({ key: 'kube-login' })).toBeDefined()
   await ui.unmount()
 })
+
+test('after a pick, Claude\'s Bash commands carry the picked AWS profile and kubeconfig', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '/home/t/.kube/sandbox.kubeconfig', HOME: '/home/t' }
+  switchWorld(on, env)
+  const ran: string[] = []
+  on('tool.call', { tool: 'Bash' } as any, (_$: any, e: any) => {
+    ran.push(e.command)
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+
+  // nothing picked yet: commands pass through untouched
+  await $.tool.call({ tool: 'Bash', command: 'aws sts get-caller-identity' } as any)
+  expect(ran.at(-1)).toBe('aws sts get-caller-identity')
+
+  const ui = await mount($, 'terminal')
+  await ui.select({ key: 'aws-profile-select', value: 'prod' })
+  await $.tool.call({ tool: 'Bash', command: 'aws sts get-caller-identity' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='prod'; aws sts get-caller-identity")
+
+  await ui.select({ key: 'kubeconfig-select', value: '/home/t/.kube/prod-eu.kubeconfig' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  expect(ran.at(-1)).toBe("export AWS_PROFILE='prod'; export KUBECONFIG='/home/t/.kube/prod-eu.kubeconfig'; ls")
+  await ui.unmount()
+})

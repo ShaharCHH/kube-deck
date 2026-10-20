@@ -58,6 +58,10 @@ let kubeconfig = ''
 let kubeServerDraft = ''
 let kubeLogin = { status: 'idle', last: null }
 let kubeLoginWanted = false
+// Values picked in the panel (AWS_PROFILE, KUBECONFIG). `$.env.set` alone does not reach the shell
+// Claude's Bash tool runs (checked: AWS_PROFILE stayed empty there after a pick), so the guard
+// puts them in front of each Bash command it forwards.
+let picked = {}
 // Set by the Log in button; the 1s timer (which holds the session's `$`) does the actual login.
 let awsLoginWanted = false
 // Todos are kept per project root: key 'todos:<root>' in $.store (shared by all sessions).
@@ -263,11 +267,20 @@ async function discoverKubeconfigs($) {
   kubeconfigs = found.sort()
 }
 
+// `export NAME='value'; ` for each picked variable. Values are quoted, so a path with a space
+// or a quote in it stays one word.
+function pickedPrefix() {
+  return Object.entries(picked)
+    .map(([k, v]) => 'export ' + k + "='" + String(v).replace(/'/g, "'\\''") + "'; ")
+    .join('')
+}
+
 // Only values the dropdown offered are accepted, never free text.
 async function switchAws($, name) {
   if (!awsProfiles.includes(name) || name === aws.profile) return
   const r = await $.env.set('AWS_PROFILE', name)
   if (r?.deny) return $.ui.toast('Could not switch AWS profile: ' + r.deny)
+  picked.AWS_PROFILE = name
   await resolveAws($) // reads the new AWS_PROFILE and resets what we knew about the old one
   $.ui.toast('AWS profile is now ' + name + ' (commands Claude runs from now on)')
   checkAws($, true).catch(() => {})
@@ -280,6 +293,7 @@ async function switchKubeconfig($, path) {
   // an approve-all given for the old cluster must not carry over to the new one
   const wasArmed = approveAll
   if (wasArmed) await setApprove($, false)
+  picked.KUBECONFIG = path
   kubeconfig = path
   await refreshCluster($) // re-judges prod / non-prod for the new file
   $.ui.toast('Kubeconfig is now ' + path.split('/').pop() + (wasArmed ? '; approve-all switched off' : ''))
@@ -746,7 +760,11 @@ export function register(on) {
   // ---- the guard: ask on prod, redact secrets from the output, write the audit log
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const verdict = classify(e.command)
-    if (!verdict.touches) return next(e)
+    // what the shell actually runs: the picked AWS profile / kubeconfig first, then the command.
+    // The checks below look at the original command, so they are not fooled by the prefix.
+    const prefix = pickedPrefix()
+    const go = (ev) => next(prefix ? { ...ev, command: prefix + ev.command } : ev)
+    if (!verdict.touches) return go(e)
 
     // the kubeconfig or the project may have changed since the last call
     await refreshCluster($)
@@ -776,7 +794,7 @@ export function register(on) {
       $.ui.invalidate('ui.render')
     }
 
-    const result = await next(e)
+    const result = await go(e)
     await refreshCluster($) // e.g. `oc project foo` just changed the namespace
     return await redactResult($, e.command, result)
   }).catch(async ($, e, next) => ({
