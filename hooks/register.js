@@ -12,6 +12,14 @@ const pickedAtom = atom(PICKED_REF, {})
 // A cluster counts as prod when any of these match the kubeconfig path, the cluster
 // name, or the API server URL. Unknown cluster (no kubeconfig / oc missing) = strict.
 const PROD_PATTERNS = [/prod/i]
+// ...and ONLY a cluster that matches one of these is trusted as non-prod. Matched against the
+// kubeconfig FILE name, the cluster name and the API host (not the folder, so a home directory
+// called "devops" marks nothing). A name that matches neither list is "unlisted" and is treated
+// as prod, so a prod cluster nobody named "prod" still gets asked. PROD_PATTERNS wins over this.
+// A letter on either side breaks a match, so "devops" is not "dev"; digits and - _ . do not.
+const NONPROD_PATTERNS = [
+  /(^|[^a-z])(sandbox|dev|test|staging|stage|qa|lab|demo|local|minikube|kind|crc|docker-desktop|rancher-desktop)([^a-z]|$)/i,
+]
 // Used only to READ the local kubeconfig (`config view --minify`), never talks to a cluster.
 const KUBE_CLI = 'oc'
 // Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
@@ -52,7 +60,8 @@ const THEME = {
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
 // approveAll is deliberately never persisted: every new session starts guarded.
-let cluster = { known: false, name: '', namespace: '', server: '', isProd: true }
+// level: strict (unreadable) | prod (matches PROD_PATTERNS) | unlisted (matches neither list) | nonprod
+let cluster = { known: false, name: '', namespace: '', server: '', isProd: true, level: 'strict' }
 let approveAll = false
 let approveUntil = 0
 let todos = []
@@ -136,10 +145,24 @@ async function refreshCluster($) {
   const name = file && file !== 'config' ? file : prettyName(entryName, server)
   const known = Boolean(info && name)
   const haystack = [kubeconfig, name, entryName, server].join(' ')
-  const isProd = !known || PROD_PATTERNS.some((re) => re.test(haystack))
+  // non-prod is trusted only by name: file name, cluster name, API host (never the folder)
+  const host = /^https?:\/\/([^:/]+)/.exec(server)?.[1] ?? ''
+  const nameHaystack = [kubeconfig.split(':')[0].split('/').pop(), name, entryName, host].join(' ')
+  const level = !known
+    ? 'strict'
+    : PROD_PATTERNS.some((re) => re.test(haystack))
+      ? 'prod'
+      : NONPROD_PATTERNS.some((re) => re.test(nameHaystack))
+        ? 'nonprod'
+        : 'unlisted'
 
-  cluster = { known, name, namespace, server, isProd }
+  cluster = { known, name, namespace, server, isProd: level !== 'nonprod', level }
   $.ui.invalidate('ui.render')
+}
+
+// How the cluster is called in prompts and replies.
+function levelLabel() {
+  return cluster.level === 'nonprod' ? 'non-prod' : cluster.level === 'unlisted' ? 'not marked non-prod, treated as prod' : cluster.level === 'prod' ? 'PROD' : 'unknown, treated as prod'
 }
 
 // ---- aws
@@ -680,7 +703,7 @@ async function redactResult($, command, result) {
 
 function describeVerdict(verdict, command) {
   const where = cluster.known
-    ? cluster.name + (cluster.namespace ? ' / ' + cluster.namespace : '') + (cluster.isProd ? ' (PROD)' : '')
+    ? cluster.name + (cluster.namespace ? ' / ' + cluster.namespace : '') + (cluster.isProd ? ' (' + levelLabel() + ')' : '')
     : 'unknown cluster'
   const why = verdict.retarget
     ? 'This command sets its own cluster/context, so the panel may not show where it lands.'
@@ -905,7 +928,7 @@ export function register(on) {
       text:
         (cluster.known ? cluster.name : 'no cluster found') +
         ' | project: ' + (cluster.namespace || 'default') +
-        ' | prod: ' + cluster.isProd +
+        ' | prod: ' + cluster.isProd + ' (' + levelLabel() + ')' +
         ' | approve-all: ' + (await approveActive($)) +
         ' | aws: ' + (aws.profile ? aws.profile + ' (' + aws.status + ')' : 'no profile'),
     }
@@ -931,7 +954,7 @@ export function register(on) {
   on('command.run', { command: 'kube-login' }, async ($, e) => {
     await loginKube($, String(e.args ?? '').trim())
     await refreshCluster($)
-    return { text: (cluster.known ? cluster.name + (cluster.isProd ? ' (PROD)' : ' (non-prod)') : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
+    return { text: (cluster.known ? cluster.name + ' (' + levelLabel() + ')' : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
   })
 
   on('command.run', { command: 'audit' }, async ($) => {
@@ -1051,8 +1074,15 @@ export function register(on) {
       kubeLogin = { status: 'logging', last: null }
       $.ui.invalidate('ui.render')
     }
-    const level = !cluster.known ? THEME.danger : cluster.isProd ? THEME.danger : THEME.ok
-    const badge = !cluster.known ? chip('STRICT', THEME.danger) : cluster.isProd ? chip('PROD', THEME.danger) : chip('non-prod', THEME.ok)
+    const level = cluster.level === 'nonprod' ? THEME.ok : cluster.level === 'unlisted' ? THEME.warn : THEME.danger
+    const badge =
+      cluster.level === 'strict'
+        ? chip('STRICT', THEME.danger)
+        : cluster.level === 'prod'
+          ? chip('PROD', THEME.danger)
+          : cluster.level === 'unlisted'
+            ? chip('UNLISTED', THEME.warn)
+            : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
       [field('project', cluster.namespace || 'default', THEME.text)],
       ...(kubeconfigs.length > 0
@@ -1248,7 +1278,9 @@ export function register(on) {
             children: [
               armed
                 ? 'Changes run WITHOUT asking, prod included, until the timer ends.'
-                : cluster.isProd
+                : cluster.level === 'unlisted'
+                  ? 'Name not in NONPROD_PATTERNS, so treated as prod: asking before every cluster-changing command.'
+                  : cluster.isProd
                   ? 'Asking before every cluster-changing command.'
                   : 'Non-prod: only commands that set their own target are asked.',
             ],

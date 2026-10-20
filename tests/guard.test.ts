@@ -65,6 +65,41 @@ test('non-prod: changes run without a question', async ($, on) => {
   expect(seen.audit.at(-1).outcome).toBe('non-prod')
 })
 
+// Only a name on the NONPROD list is trusted. A cluster nobody called "prod" is "unlisted" and asked.
+test('a cluster whose name is on neither list is asked, like prod', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/k/finance-east.kubeconfig', answer: 'Refuse' })
+  const denied: any = await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
+  expect(String(denied.deny)).toContain('declined')
+  expect(seen.asks[0]).toContain('not marked non-prod')
+  await $.tool.call({ tool: 'Bash', command: 'oc get pods' } as any) // a read still passes
+  expect(seen.ran).toEqual(['oc get pods'])
+})
+
+test('the folder never marks a cluster non-prod (a home directory called devops)', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/home/devops/.kube/finance-east.kubeconfig', answer: 'Refuse' })
+  await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
+  expect(seen.asks.length).toBe(1)
+})
+
+test('prod wins over the non-prod list (sandbox-prod is asked)', async ($, on) => {
+  const a = world(on, { kubeconfig: '/k/sandbox-prod.kubeconfig', answer: 'Refuse' })
+  await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
+  expect(a.seen.asks.length).toBe(1)
+})
+
+test('a name on the non-prod list is trusted (digits and dashes around it are fine)', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/k/sno-sandbox2938-opentlc-com.kubeconfig' })
+  await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
+  expect(seen.asks.length).toBe(0)
+  expect(seen.audit.at(-1).outcome).toBe('non-prod')
+})
+
+test('devops is not dev', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/k/devops-east.kubeconfig', answer: 'Refuse' })
+  await $.tool.call({ tool: 'Bash', command: 'oc delete pod x' } as any)
+  expect(seen.asks.length).toBe(1)
+})
+
 test('approve-all skips the question, then expires after 15 minutes', async ($, on) => {
   const { clock, seen } = world(on, { kubeconfig: '/k/prod-east.kubeconfig', answer: 'Run it' })
   await $.command.run({ command: 'approve-all', args: '' })

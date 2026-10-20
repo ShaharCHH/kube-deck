@@ -252,6 +252,34 @@ function switchWorld(on: any, env: Record<string, string>) {
   )
 }
 
+test('the cluster badge tells prod, non-prod and unlisted apart', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/finance-east.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('process.run', (_$: any, e: any) =>
+    e.argv[0] === 'oc'
+      ? { value: { exitCode: 0, stdout: KUBECONFIG_JSON, stderr: '' } }
+      : { value: { exitCode: 1, stdout: '', stderr: '' } },
+  )
+  const badge = async (kubeconfig: string) => {
+    env.KUBECONFIG = kubeconfig
+    await $.command.run({ command: 'ctx', args: '' })
+    const ui = await mount($, 'terminal')
+    const text = JSON.stringify(await ui.find({ type: 'Text', text: /PROD|UNLISTED|non-prod|STRICT/ }))
+    await ui.unmount()
+    return text
+  }
+  expect(await badge('/k/finance-east.kubeconfig')).toContain('UNLISTED')
+  expect(await badge('/k/prod-east.kubeconfig')).toContain('PROD')
+  expect(await badge('/k/sandbox-1.kubeconfig')).toContain('non-prod')
+})
+
 // The panel shows a profile from .aws-profile or the only one in ~/.aws/config, which Claude's
 // shell does not have: the guard must export it, or the card says "signed in" for a profile the
 // commands never use. A profile from AWS_PROFILE itself needs nothing.
