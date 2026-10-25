@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Added
+- `extras/skills/kube-readonly-triage`: a standalone read-only triage skill (`SKILL.md` and logo) for failing workloads on Kubernetes / OpenShift. It is not loaded by the plugin and is advice only; the guard stays the enforcement.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.
