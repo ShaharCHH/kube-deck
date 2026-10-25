@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="kube-readonly-triage">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16294a"/>
+      <stop offset="1" stop-color="#0a1428"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3ad6c5"/>
+      <stop offset="1" stop-color="#2f8cff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+
+  <!-- cluster of pods: three small hexagons behind the lens -->
+  <g fill="none" stroke="#2c4470" stroke-width="10" stroke-linejoin="round">
+    <path d="M96 150 l30 -17 l30 17 v34 l-30 17 l-30 -17 z"/>
+    <path d="M356 96 l30 -17 l30 17 v34 l-30 17 l-30 -17 z"/>
+    <path d="M404 322 l26 -15 l26 15 v30 l-26 15 l-26 -15 z"/>
+  </g>
+
+  <!-- magnifying glass handle -->
+  <line x1="318" y1="318" x2="428" y2="428" stroke="url(#glass)" stroke-width="40" stroke-linecap="round"/>
+
+  <!-- lens -->
+  <circle cx="232" cy="232" r="126" fill="#0d1d38" stroke="url(#glass)" stroke-width="30"/>
+
+  <!-- pod hexagon inside the lens -->
+  <path d="M232 150 l58 33 v66 l-58 33 l-58 -33 v-66 z" fill="none" stroke="#3ad6c5" stroke-width="12" stroke-linejoin="round" opacity="0.55"/>
+
+  <!-- pulse line: the health check -->
+  <polyline points="150,236 196,236 216,190 248,284 270,236 314,236" fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
