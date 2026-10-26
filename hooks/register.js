@@ -87,7 +87,9 @@ export function register(on) {
           wanted.kubeLogin = false
           const insecure = wanted.kubeInsecure
           wanted.kubeInsecure = false
-          await loginKube($, '', insecure)
+          const method = wanted.kubeMethod
+          wanted.kubeMethod = 'browser'
+          await loginKube($, '', insecure, method === 'token' || method === 'password' ? method : 'web')
         }
         if (wanted.awsSso) {
           wanted.awsSso = false
