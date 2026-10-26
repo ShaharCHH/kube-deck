@@ -17,6 +17,10 @@ export const NONPROD_PATTERNS = [
 // Used only to READ the local kubeconfig (`config view --minify`), never talks to a cluster.
 export const KUBE_CLI = 'oc'
 
+// Used to write an OIDC (SSO) kubeconfig and sign in to it: `kubectl config set-*`, then the
+// `kubectl oidc-login` plugin (krew "oidc-login", or brew "kubelogin") does the browser sign-in.
+export const KUBECTL_CLI = 'kubectl'
+
 // Used to check the AWS login (`sts get-caller-identity`, read-only). Run at most every 5 minutes.
 export const AWS_CLI = 'aws'
 
@@ -34,6 +38,11 @@ export const KUBE_CRED_LOGIN_MS = 60000
 
 // API URL typed in the panel: https, a host name, optional port. It ends up in a command line.
 export const KUBE_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/
+
+// OIDC issuer URL (https, host, optional port and path) and client id typed in the panel; both end up in a kubeconfig.
+export const OIDC_ISSUER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?(\/[A-Za-z0-9_.~\/-]*)?$/
+
+export const OIDC_CLIENT_RE = /^[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,127}$/
 
 // SSO start URL and region typed in the panel; both end up in ~/.aws/config and on a command line.
 export const AWS_SSO_URL_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(\/[A-Za-z0-9_.\/-]*)?$/
