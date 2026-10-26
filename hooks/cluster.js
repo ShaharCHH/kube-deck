@@ -116,8 +116,10 @@ export async function switchKubeconfig($, path) {
 
 // Logs in to a cluster through the browser (`oc login --web`) into a kubeconfig file of its own,
 // so no kubeconfig has to exist first and no other file is touched. No password or token passes
-// through the panel. Logging in again to the cluster already in use refreshes that same file.
-export async function loginKube($, typed) {
+// through the panel. `insecure` adds --insecure-skip-tls-verify for a cluster whose certificate is
+// not trusted: the token then goes to whoever answers at that address, so it is never the default;
+// the panel offers it only after a login failed with a certificate error. Logging in again to the cluster already in use refreshes that same file.
+export async function loginKube($, typed, insecure = false) {
   // "api.x.example.com:6443" works too: https:// is added when no scheme was typed
   let url = String(typed || drafts.kubeServer || cluster.server || '').trim().replace(/\/+$/, '')
   if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
@@ -140,13 +142,15 @@ export async function loginKube($, typed) {
   const started = await $.clock.now()
   let ok = false
   let note = ''
+  let badCert = false
   try {
-    const r = await $.process.run([KUBE_CLI, 'login', '--web', '--server=' + url], {
+    const r = await $.process.run([KUBE_CLI, 'login', '--web', '--server=' + url, ...(insecure ? ['--insecure-skip-tls-verify'] : [])], {
       timeoutMs: KUBE_LOGIN_MS,
       env: { KUBECONFIG: file },
     })
     ok = r.exitCode === 0
     if (!ok) {
+      badCert = /x509|certificate/i.test(String(r.stderr || '') + String(r.stdout || ''))
       const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
       note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
     }
@@ -154,13 +158,13 @@ export async function loginKube($, typed) {
     note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
   }
   const secs = Math.round(((await $.clock.now()) - started) / 1000)
-  kubeLogin = { status: 'idle', last: { ok, secs, note } }
+  kubeLogin = { status: 'idle', last: { ok, secs, note, badCert, insecure } }
   if (ok) {
     drafts.kubeServer = ''
     await discoverKubeconfigs($)
     if (file === kubeconfig) await refreshCluster($)
     else await switchKubeconfig($, file) // also re-judges prod and switches approve-all off
-    $.ui.toast('Logged in to ' + host)
+    $.ui.toast('Logged in to ' + host + (insecure ? ' (certificate NOT verified)' : ''))
   } else {
     $.ui.toast('Cluster login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   }
