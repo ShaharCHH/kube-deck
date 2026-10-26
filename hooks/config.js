@@ -43,6 +43,16 @@ export const AWS_REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/
 
 export const AWS_PROFILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_.@+=,-]*$/
 
+// The cluster card shows whether the active cluster's API address answers (host and port come from the
+// kubeconfig; nothing to set). It is a plain TCP connect, checked at most this often.
+export const REACH_CHECK_MS = 10000
+
+// Extra addresses to watch next to the API, each shown as a row on the cluster card, up or DOWN. Empty by
+// default. Useful for a local port-forward or tunnel to something the kubeconfig does not name, like a
+// web console on 443. host defaults to 127.0.0.1.
+//   export const WATCH_PORTS = [{ name: 'console', port: 443 }]
+export const WATCH_PORTS = []
+
 // Approve-all switches itself off this many minutes after it was turned on.
 export const APPROVE_MINUTES = 15
 

@@ -652,3 +652,62 @@ test('AWS SSO: a login that leaves no token says so and adds no profile', async 
   expect(await ui.find({ type: 'Text', text: /no SSO token was found/ })).toBeDefined()
   await ui.unmount()
 })
+
+// API reachability on the cluster card: host and port come from the kubeconfig, a plain TCP connect.
+function reachWorld(on: any, state: { listening: boolean; resolvesLocal: boolean; ncMissing?: boolean }) {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  mock.env(on, { KUBECONFIG: '/k/sandbox.kubeconfig', HOME: '/home/t' })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  const probes: string[][] = []
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] === 'oc') return { value: { exitCode: 0, stdout: KUBECONFIG_JSON, stderr: '' } }
+    if (e.argv[0] === 'nc') {
+      probes.push(e.argv)
+      if (state.ncMissing) return { value: { exitCode: 127, stdout: '', stderr: 'nc: command not found' } }
+      return { value: { exitCode: state.listening ? 0 : 1, stdout: '', stderr: '' } }
+    }
+    if (e.argv[0] === 'dscacheutil') {
+      return { value: { exitCode: 0, stdout: state.resolvesLocal ? 'name: api.x.example.com\nip_address: 127.0.0.1\n' : '', stderr: '' } }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'not found' } }
+  })
+  on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: undefined }))
+  on('tool.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  return { clock, probes }
+}
+
+test('cluster card: the API row follows whether the kubeconfig\'s address answers, and hints at a tunnel when it is local', async ($, on) => {
+  const state = { listening: true, resolvesLocal: true }
+  const { clock, probes } = reachWorld(on, state)
+  await $.session.start({ cwd: '/work/my-repo', surface: 'terminal', isInteractive: true })
+  const ui = await mount($, 'terminal')
+
+  await clock.advance(1500)
+  expect(probes[0]).toEqual(['nc', '-z', '-w', '2', 'api.x.example.com', '6443']) // from the kubeconfig, nothing set
+  expect(JSON.stringify(await ui.find({ type: 'Text', text: /reachable/ }))).toContain('reachable')
+  expect(await ui.find({ type: 'Text', text: /may have ended/ })).toBeUndefined()
+
+  state.listening = false // a tunnel that ended quietly
+  await clock.advance(11000)
+  expect(await ui.find({ type: 'Text', text: /UNREACHABLE/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /points at this machine/ })).toBeDefined()
+
+  state.resolvesLocal = false // a remote cluster that is down: no tunnel talk
+  await clock.advance(11000)
+  expect(await ui.find({ type: 'Text', text: /UNREACHABLE/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /points at this machine/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('cluster card: no nc means no verdict, not "unreachable"', async ($, on) => {
+  const { clock } = reachWorld(on, { listening: false, resolvesLocal: false, ncMissing: true })
+  await $.session.start({ cwd: '/work/my-repo', surface: 'terminal', isInteractive: true })
+  const ui = await mount($, 'terminal')
+  await clock.advance(1500)
+  expect(await ui.find({ type: 'Text', text: /UNREACHABLE/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /reachable/ })).toBeUndefined()
+  await ui.unmount()
+})

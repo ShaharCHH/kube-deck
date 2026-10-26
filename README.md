@@ -103,6 +103,8 @@ The panel opens by itself, unfocused. Beside the transcript it needs a wide full
 
 - Cluster name, project (namespace) and a badge: red `PROD`, green `non-prod`, amber `UNLISTED` (the name matches neither list, so it is treated as prod), or `STRICT` (the cluster can't be read).
 - **`kubeconfig` dropdown:** the files in `~/.kube` that read like a kubeconfig, plus the one in `KUBECONFIG`.
+- **`api` row:** `reachable` or red `UNREACHABLE`, from a plain TCP connect (`nc -z`) to the host and port in the kubeconfig's `server`, every 10 seconds. Nothing is sent, but it does touch the cluster's address, unlike the rest of the card, which only reads the file. Nothing to set. It is most useful behind a local port-forward or tunnel (an SSM session, `oc port-forward`, an SSH forward), which can end quietly while the kubeconfig keeps pointing at `127.0.0.1`: when the address is unreachable and resolves to this machine (asked of the system resolver, so `/etc/hosts` counts; macOS only), the card says the tunnel may have ended. It proves the port is open, not that the cluster works. No `nc` means no row, never a false alarm. Start tunnels yourself; kube-deck does not.
+- **`WATCH_PORTS`:** optional extra rows for other addresses, for example a console behind a second forward: `export const WATCH_PORTS = [{ name: 'console', port: 443 }]` in `hooks/config.js` (`host` defaults to `127.0.0.1`). Each shows `up` or red `DOWN`. Empty by default.
 - **Cluster login:** type the API URL (`api.mycluster.example.com:6443`, `https://` is added for you) and press `Log in (browser)`. It runs `oc login --web --server=<url>` into its own file, `~/.kube/<cluster>.kubeconfig`, so no kubeconfig has to exist and no other file is touched. It waits up to 10 minutes for you to approve in the browser, then switches to that file. No password or token passes through the panel; for token or password logins use a terminal. Needs an `oc` and a cluster that support `--web`. A failed login says why on the card.
 
 ### AWS card
@@ -185,6 +187,7 @@ Everything is in `hooks/config.js`:
 | `NONPROD_PATTERNS` | sandbox, dev, test, staging, stage, qa, lab, demo, local, minikube, kind, crc, docker-desktop, rancher-desktop | Matched against the kubeconfig *file name*, cluster name and API host (never the folder, so a home directory called `devops` marks nothing). A letter next to the word breaks the match: `devops` is not `dev`, `sandbox1234` is `sandbox`. **Add your own environment names here.** |
 | `APPROVE_MINUTES` | `15` | How long approve-all stays on. |
 | `AUDIT_DIR` | `.kube-deck` | Folder under `$HOME` for the audit log. |
+| `WATCH_PORTS` | `[]` | Extra `{ name, port, host? }` addresses shown as `up` / `DOWN` rows on the cluster card. |
 
 ## Limits
 
@@ -213,6 +216,7 @@ GitHub Actions runs the plain-Node checks on every push and pull request (module
 | `hooks/guard.js` | The Bash guard: asks on prod, redacts output, writes the audit log. |
 | `hooks/panel.js` | Draws the panel. |
 | `hooks/cluster.js` | Cluster state, the kubeconfig dropdown and the browser cluster login. |
+| `hooks/reach.js`, `targets.js` | Whether the cluster's API and `WATCH_PORTS` answer (a TCP connect), and the pure address parsing it uses. |
 | `hooks/aws.js` | AWS profile state, login, the profile dropdown and adding a profile from an SSO URL. |
 | `hooks/audit.js` | The recent-commands feed, the audit log, output redaction and the approval question. |
 | `hooks/approve.js`, `todos.js`, `picked.js`, `shared.js` | Approve-all, the to-do list, what was picked in the panel (kept in session state), and state shared by the panel and the logins. |

@@ -35,3 +35,6 @@ jobs:
 
       - name: Redaction
         run: node tests/redact.test.mjs
+
+      - name: Reachability targets
+        run: node tests/reach.test.mjs
