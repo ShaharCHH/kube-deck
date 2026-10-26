@@ -4,6 +4,10 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Added
+- **Add a kubeconfig by path** in the cluster card: checked, copied into `~/.kube` with mode 600, selected.
+- **Token and user + password cluster logins** next to the browser one (`log in with` picker). Typed values live only in memory, are replaced by `***` in error messages and are emptied after a successful login. The panel cannot hide typed text; see the README.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.
