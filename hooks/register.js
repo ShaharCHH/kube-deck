@@ -1,9 +1,10 @@
 import { approveActive, approveAll, setApprove } from './approve.js'
 import { aws, awsSso, checkAws, loginAws, loginAwsSso, resolveAws } from './aws.js'
 import { cluster, discoverKubeconfigs, kubeLogin, levelLabel, loginKube, refreshCluster } from './cluster.js'
-import { APPROVE_MINUTES, AUDIT_DIR, PANE, PANE_COLUMNS, TODO_TOOL, newId } from './config.js'
+import { APPROVE_MINUTES, AUDIT_DIR, PANE, PANE_COLUMNS, REACH_CHECK_MS, TODO_TOOL, newId } from './config.js'
 import { registerGuard } from './guard.js'
 import { registerPanel } from './panel.js'
+import { checkReach } from './reach.js'
 import { wanted } from './shared.js'
 import { formatTodos, loadTodos, mutateTodos, todos } from './todos.js'
 
@@ -100,6 +101,8 @@ export function register(on) {
     // The AWS login check runs in the background so it never delays a prompt: once soon after
     // start, then whenever the last check is older than AWS_CHECK_MS.
     $.clock.after(1000, () => checkAws($, false).catch(() => {}))
+    $.clock.after(1000, () => checkReach($).catch(() => {}))
+    $.clock.every(REACH_CHECK_MS, () => checkReach($).catch(() => {}))
     $.clock.every(30000, () => checkAws($, false).catch(() => {}))
     // Open the panel unfocused. In a narrow terminal it waits (isPlaced false); /deck opens it.
     try {

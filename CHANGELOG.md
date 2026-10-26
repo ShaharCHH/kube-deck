@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Added
+- **API reachability** on the cluster card: `reachable` / `UNREACHABLE` from a TCP connect to the kubeconfig's server address, with a hint when it points at this machine (a tunnel that ended). Optional `WATCH_PORTS` in `hooks/config.js` for extra addresses.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.

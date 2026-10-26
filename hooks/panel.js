@@ -3,6 +3,8 @@ import { activity, hhmm } from './audit.js'
 import { addSsoProfile, aws, awsProfiles, awsSso, checkAws, setAwsSso, switchAws } from './aws.js'
 import { cluster, kubeLogin, kubeconfig, kubeconfigs, setKubeLogin, switchKubeconfig } from './cluster.js'
 import { PANE, PANE_COLUMNS, THEME, newId } from './config.js'
+import { checkReach, reach } from './reach.js'
+import { apiTarget } from './targets.js'
 import { drafts, wanted } from './shared.js'
 import { mutateTodos, repoName, todos } from './todos.js'
 
@@ -71,7 +73,17 @@ export function registerPanel(on) {
             ? chip('UNLISTED', THEME.warn)
             : chip('non-prod', THEME.ok)
     const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
-      [field('project', cluster.namespace || 'default', THEME.text)],
+      [
+        field('project', cluster.namespace || 'default', THEME.text),
+        // only for the cluster on show: a result measured for the previous one is not shown
+        ...(reach.api && reach.api.key === apiTarget(cluster.server)?.key
+          ? [field('api', reach.api.up ? 'reachable' : 'UNREACHABLE', reach.api.up ? THEME.ok : THEME.danger)]
+          : []),
+        ...reach.watched.map((w) => field(w.name.slice(0, 8), (w.up ? 'up' : 'DOWN') + ' (' + w.host + ':' + w.port + ')', w.up ? THEME.ok : THEME.danger)),
+      ],
+      ...(reach.api && !reach.api.up && reach.api.hint && reach.api.key === apiTarget(cluster.server)?.key
+        ? [[Text({ color: THEME.warn, wrap: 'wrap', children: ['The API address points at this machine. If you use a tunnel or port-forward to reach the cluster, it may have ended.'] })]]
+        : []),
       ...(kubeconfigs.length > 0
         ? [
             [
@@ -80,7 +92,10 @@ export function registerPanel(on) {
                 label: 'kubeconfig',
                 options: kubeconfigs.map((f) => ({ value: f, label: f.split('/').pop() })),
                 value: kubeconfig || undefined,
-                onSelect: (value) => switchKubeconfig($, value),
+                onSelect: async (value) => {
+                  await switchKubeconfig($, value)
+                  checkReach($).catch(() => {}) // the new cluster's API, without waiting for the timer
+                },
               }),
             ],
           ]
