@@ -1,7 +1,7 @@
 // The cluster on show: which one, prod or not, the kubeconfig dropdown, and the browser login.
 
 import { approveAll, setApprove } from './approve.js'
-import { KUBE_CLI, KUBE_CRED_LOGIN_MS, KUBE_LOGIN_MS, KUBE_SERVER_RE, NONPROD_PATTERNS, PROD_PATTERNS } from './config.js'
+import { KUBECTL_CLI, KUBE_CLI, KUBE_CRED_LOGIN_MS, KUBE_LOGIN_MS, KUBE_SERVER_RE, NONPROD_PATTERNS, OIDC_CLIENT_RE, OIDC_ISSUER_RE, PROD_PATTERNS } from './config.js'
 import { setPicked } from './picked.js'
 import { drafts, secrets } from './shared.js'
 
@@ -181,6 +181,100 @@ export async function loginKube($, typed, insecure = false, method = 'web') {
     $.ui.toast('Logged in to ' + host + (insecure ? ' (certificate NOT verified)' : ''))
   } else {
     $.ui.toast('Cluster login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// Signs in to a plain Kubernetes cluster with OIDC (SSO) through `kubectl oidc-login`. oc login cannot
+// do this: the cluster has no login endpoint of its own, the identity provider does. So this writes
+// a kubeconfig that calls the oidc-login plugin for its token (cluster, user and context entries in
+// a file of its own), then runs one call that needs a token, which opens the browser. Nothing secret
+// is typed: the issuer URL and client id are not secrets, and the plugin keeps the token in
+// ~/.kube/cache/oidc-login. A public client (no client secret) is assumed.
+export async function loginKubeOidc($, typed, insecure = false) {
+  let url = String(typed || drafts.kubeServer || cluster.server || '').trim().replace(/\/+$/, '')
+  if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
+  const issuer = String(drafts.oidcIssuer).trim().replace(/\/+$/, '')
+  const clientId = String(drafts.oidcClient).trim()
+  const refuse = (note) => {
+    kubeLogin = { status: 'idle', last: { ok: false, secs: null, note } }
+    $.ui.invalidate('ui.render')
+    $.ui.toast(note)
+  }
+  if (!KUBE_SERVER_RE.test(url)) return refuse('Not a usable cluster URL. Type it like api.mycluster.example.com:6443 (https only).')
+  if (!OIDC_ISSUER_RE.test(issuer) || issuer.includes('..')) return refuse('Type the OIDC issuer URL, like https://login.example.com/realms/prod (https only).')
+  if (!OIDC_CLIENT_RE.test(clientId)) return refuse('Type the OIDC client id (letters, digits and . _ : @ -).')
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {}
+  if (!home) return $.ui.toast('Cannot log in: HOME is not set')
+  const host = /^https:\/\/([^:/]+)/.exec(url)[1].replace(/^api\./, '').replace(/[^A-Za-z0-9]+/g, '-')
+  const reuse = kubeconfig && url === cluster.server
+  const file = reuse ? kubeconfig : home + '/.kube/' + host + '.kubeconfig'
+  kubeLogin = { status: 'logging', last: null }
+  $.ui.invalidate('ui.render')
+  const started = await $.clock.now()
+  const run = (argv, timeoutMs) => $.process.run([KUBECTL_CLI, ...argv], { timeoutMs, env: { KUBECONFIG: file } })
+  const name = 'oidc-' + host
+  let ok = false
+  let note = ''
+  let badCert = false
+  try {
+    const plugin = await run(['oidc-login', '--version'], 5000)
+    if (plugin.exitCode !== 0) {
+      note = 'kubectl oidc-login is not installed (brew install kubelogin, or kubectl krew install oidc-login).'
+    } else {
+      // set-* merge into the file, so say the insecure flag both ways: an earlier "anyway" must not stay on
+      const steps = [
+        ['config', 'set-cluster', host, '--server=' + url, '--insecure-skip-tls-verify=' + (insecure ? 'true' : 'false')],
+        [
+          'config', 'set-credentials', name,
+          '--exec-api-version=client.authentication.k8s.io/v1',
+          '--exec-interactive-mode=IfAvailable',
+          '--exec-command=' + KUBECTL_CLI,
+          '--exec-arg=oidc-login',
+          '--exec-arg=get-token',
+          '--exec-arg=--oidc-issuer-url=' + issuer,
+          '--exec-arg=--oidc-client-id=' + clientId,
+        ],
+        ['config', 'set-context', host, '--cluster=' + host, '--user=' + name],
+        ['config', 'use-context', host],
+      ]
+      let failed = ''
+      for (const argv of steps) {
+        const r = await run(argv, 5000)
+        if (r.exitCode !== 0) {
+          failed = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? 'kubectl config failed'
+          break
+        }
+      }
+      if (failed) {
+        note = 'Could not write the kubeconfig: ' + failed.replace(/https?:\/\/\S+/g, '<url>').slice(0, 100)
+      } else {
+        // any call that needs a token; whoami (Kubernetes 1.28+) changes nothing and is allowed to every signed-in user
+        const r = await run(['auth', 'whoami'], KUBE_LOGIN_MS)
+        ok = r.exitCode === 0
+        if (!ok) {
+          badCert = /x509|certificate/i.test(String(r.stderr || '') + String(r.stdout || ''))
+          const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+          note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+        }
+      }
+    }
+  } catch (err) {
+    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+  }
+  const secs = Math.round(((await $.clock.now()) - started) / 1000)
+  kubeLogin = { status: 'idle', last: { ok, secs, note, badCert, insecure } }
+  if (ok) {
+    drafts.kubeServer = ''
+    await discoverKubeconfigs($)
+    if (file === kubeconfig) await refreshCluster($)
+    else await switchKubeconfig($, file)
+    $.ui.toast('Signed in to ' + host + ' with SSO' + (insecure ? ' (certificate NOT verified)' : ''))
+  } else {
+    $.ui.toast('SSO login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   }
   $.ui.invalidate('ui.render')
 }

@@ -59,7 +59,7 @@ export function registerPanel(on) {
       if (kubeLogin.status === 'logging' || wanted.kubeLogin) return
       wanted.kubeLogin = true
       wanted.kubeInsecure = insecure
-      wanted.kubeMethod = drafts.kubeMethod === 'token' ? 'token' : drafts.kubeMethod === 'password' ? 'password' : 'web'
+      wanted.kubeMethod = ['oidc', 'token', 'password'].includes(drafts.kubeMethod) ? drafts.kubeMethod : 'web'
       setKubeLogin({ status: 'logging', last: null })
       $.ui.invalidate('ui.render')
     }
@@ -108,7 +108,8 @@ export function registerPanel(on) {
           key: 'kube-method',
           label: 'log in with',
           options: [
-            { value: 'browser', label: 'Browser (SSO)' },
+            { value: 'browser', label: 'Browser (OpenShift)' },
+            { value: 'oidc', label: 'SSO (Kubernetes OIDC)' },
             { value: 'token', label: 'Token' },
             { value: 'password', label: 'User + password' },
           ],
@@ -132,7 +133,32 @@ export function registerPanel(on) {
         }),
         // The panel cannot hide typed text: what is typed here shows on screen and stays in the
         // terminal's scrollback. It is kept only in memory and emptied once the login works.
-        ...(drafts.kubeMethod === 'token'
+        ...(drafts.kubeMethod === 'oidc'
+          ? [
+              Input({
+                key: 'kube-oidc-issuer',
+                label: 'issuer',
+                placeholder: 'https://login.example.com/realms/prod',
+                value: drafts.oidcIssuer,
+                submitLabel: 'next',
+                onInput: (value) => {
+                  drafts.oidcIssuer = value
+                },
+                onSubmit: () => undefined,
+              }),
+              Input({
+                key: 'kube-oidc-client',
+                label: 'client id',
+                placeholder: 'kubernetes',
+                value: drafts.oidcClient,
+                submitLabel: 'log in',
+                onInput: (value) => {
+                  drafts.oidcClient = value
+                },
+                onSubmit: () => startKubeLogin(false),
+              }),
+            ]
+          : drafts.kubeMethod === 'token'
           ? [
               Input({
                 key: 'kube-token',
@@ -176,10 +202,10 @@ export function registerPanel(on) {
           key: 'kube-login',
           label:
             kubeLogin.status === 'logging'
-              ? drafts.kubeMethod === 'browser'
+              ? drafts.kubeMethod === 'browser' || drafts.kubeMethod === 'oidc'
                 ? '…  Approve in your browser'
                 : '…  Logging in'
-              : drafts.kubeMethod === 'browser'
+              : drafts.kubeMethod === 'browser' || drafts.kubeMethod === 'oidc'
                 ? '▶  Log in (browser)'
                 : '▶  Log in',
           variant: 'primary',

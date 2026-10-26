@@ -6,6 +6,7 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ### Added
 - **Add a kubeconfig by path** in the cluster card: checked, copied into `~/.kube` with mode 600, selected.
+- **SSO login for plain Kubernetes** (OIDC through the `kubectl oidc-login` plugin): issuer URL and client id in the cluster card, written into a kubeconfig of its own. Needs `kubectl`, the plugin and Kubernetes 1.28+.
 - **Token and user + password cluster logins** next to the browser one (`log in with` picker). Typed values live only in memory, are replaced by `***` in error messages and are emptied after a successful login. The panel cannot hide typed text; see the README.
 
 ## [0.1.0] - 2026-10-20
