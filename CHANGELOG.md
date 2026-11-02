@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Fixed
+- Todo lists split across two `$.store` files when kube-deck is loaded from two sources (inline and marketplace): the panel and `todo list` now warn when more than one `kube-deck_*` store exists (#19). The lists are not merged.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

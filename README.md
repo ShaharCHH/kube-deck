@@ -181,6 +181,8 @@ It is regex-based and knows these usual shapes. A secret in a positional argumen
 
 Each project root has its own list, kept in `$.store` (shared by all sessions on the machine).
 
+The host names the store file by install source, so loading kube-deck both inline and from the marketplace gives two separate lists. kube-deck warns (panel and `todo list`) when it sees more than one `kube-deck_*.json` in `~/.claude/plugins/store/`. Load it from one source only; to move a list, copy its `todos:<root>` key into the store you keep.
+
 Claude can add to it on its own: the tool `mcp__kube-deck__todo` (list / add / done / update, no delete) plus a short system-prompt section telling it to add concrete follow-ups without asking. Its items are tagged `· claude`, duplicates are skipped, you get a toast per change, and you discard with `x`. It edits an item only after discussing it with you.
 
 ## Configuration
