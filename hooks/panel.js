@@ -1,9 +1,9 @@
 import { approveAll, approveUntil, mmss, setApprove } from './approve.js'
 import { activity, hhmm } from './audit.js'
 import { addSsoProfile, aws, awsProfiles, awsSso, checkAws, setAwsSso, switchAws } from './aws.js'
-import { cluster, kubeLogin, kubeconfig, kubeconfigs, setKubeLogin, switchKubeconfig } from './cluster.js'
+import { addKubeconfig, clearSecrets, cluster, kubeAdd, kubeLogin, kubeconfig, kubeconfigs, setKubeLogin, switchKubeconfig } from './cluster.js'
 import { PANE, PANE_COLUMNS, THEME, newId } from './config.js'
-import { drafts, wanted } from './shared.js'
+import { drafts, secrets, wanted } from './shared.js'
 import { mutateTodos, repoName, todos } from './todos.js'
 
 // Text typed in the panel's add field, kept so a redraw doesn't wipe a half-typed task.
@@ -62,6 +62,7 @@ export function registerPanel(on) {
       if (kubeLogin.status === 'logging' || wanted.kubeLogin) return
       wanted.kubeLogin = true
       wanted.kubeInsecure = insecure
+      wanted.kubeMethod = ['oidc', 'token', 'password'].includes(drafts.kubeMethod) ? drafts.kubeMethod : 'web'
       setKubeLogin({ status: 'logging', last: null })
       $.ui.invalidate('ui.render')
     }
@@ -89,27 +90,127 @@ export function registerPanel(on) {
             ],
           ]
         : []),
-      spaced([
-        Box({
-          flexDirection: 'row',
-          columnGap: 1,
-          children: [
-            Input({
-              key: 'kube-server',
-              label: 'api',
-              placeholder: cluster.server ? 'API URL (empty = this cluster)' : 'api.mycluster.example.com:6443',
-              value: drafts.kubeServer,
-              submitLabel: 'log in',
-              onInput: (value) => {
-                drafts.kubeServer = value
-              },
-              onSubmit: () => startKubeLogin(false),
-            }),
-          ],
+      // add a kubeconfig you already have (a path, not its contents: those can hold tokens)
+      [
+        Input({
+          key: 'kube-add',
+          label: 'add file',
+          placeholder: '~/Downloads/my.kubeconfig',
+          value: drafts.kubeAdd,
+          submitLabel: 'add',
+          onInput: (value) => {
+            drafts.kubeAdd = value
+          },
+          onSubmit: (value) => addKubeconfig($, value),
         }),
+      ],
+      ...(!kubeAdd.ok && kubeAdd.note ? [[Text({ color: THEME.warn, wrap: 'wrap', children: [kubeAdd.note] })]] : []),
+      // log in to a cluster: browser (SSO), token or user + password
+      spaced([
+        Select({
+          key: 'kube-method',
+          label: 'log in with',
+          options: [
+            { value: 'browser', label: 'Browser (OpenShift)' },
+            { value: 'oidc', label: 'SSO (Kubernetes OIDC)' },
+            { value: 'token', label: 'Token' },
+            { value: 'password', label: 'User + password' },
+          ],
+          value: drafts.kubeMethod,
+          onSelect: (value) => {
+            drafts.kubeMethod = value
+            clearSecrets() // nothing typed for one method is kept when you switch to another
+            $.ui.invalidate('ui.render')
+          },
+        }),
+        Input({
+          key: 'kube-server',
+          label: 'api',
+          placeholder: cluster.server ? 'API URL (empty = this cluster)' : 'api.mycluster.example.com:6443',
+          value: drafts.kubeServer,
+          submitLabel: drafts.kubeMethod === 'browser' ? 'log in' : 'next',
+          onInput: (value) => {
+            drafts.kubeServer = value
+          },
+          onSubmit: () => (drafts.kubeMethod === 'browser' ? startKubeLogin(false) : undefined),
+        }),
+        // The panel cannot hide typed text: what is typed here shows on screen and stays in the
+        // terminal's scrollback. It is kept only in memory and emptied once the login works.
+        ...(drafts.kubeMethod === 'oidc'
+          ? [
+              Input({
+                key: 'kube-oidc-issuer',
+                label: 'issuer',
+                placeholder: 'https://login.example.com/realms/prod',
+                value: drafts.oidcIssuer,
+                submitLabel: 'next',
+                onInput: (value) => {
+                  drafts.oidcIssuer = value
+                },
+                onSubmit: () => undefined,
+              }),
+              Input({
+                key: 'kube-oidc-client',
+                label: 'client id',
+                placeholder: 'kubernetes',
+                value: drafts.oidcClient,
+                submitLabel: 'log in',
+                onInput: (value) => {
+                  drafts.oidcClient = value
+                },
+                onSubmit: () => startKubeLogin(false),
+              }),
+            ]
+          : drafts.kubeMethod === 'token'
+          ? [
+              Input({
+                key: 'kube-token',
+                label: 'token',
+                placeholder: 'sha256~… (shown as you type)',
+                value: secrets.token,
+                submitLabel: 'log in',
+                onInput: (value) => {
+                  secrets.token = value.trim()
+                },
+                onSubmit: () => startKubeLogin(false),
+              }),
+            ]
+          : drafts.kubeMethod === 'password'
+            ? [
+                Input({
+                  key: 'kube-user',
+                  label: 'user',
+                  placeholder: 'user name',
+                  value: secrets.user,
+                  submitLabel: 'next',
+                  onInput: (value) => {
+                    secrets.user = value.trim()
+                  },
+                  onSubmit: () => undefined,
+                }),
+                Input({
+                  key: 'kube-pass',
+                  label: 'password',
+                  placeholder: '(shown as you type)',
+                  value: secrets.pass,
+                  submitLabel: 'log in',
+                  onInput: (value) => {
+                    secrets.pass = value.trim()
+                  },
+                  onSubmit: () => startKubeLogin(false),
+                }),
+              ]
+            : []),
         Button({
           key: 'kube-login',
-          label: kubeLogin.status === 'logging' ? '…  Approve in your browser' : '▶  Log in (browser)',
+          label:
+            kubeLogin.status === 'logging'
+              ? drafts.kubeMethod === 'browser' || drafts.kubeMethod === 'oidc'
+                ? '…  Approve in your browser'
+                : '…  Logging in'
+              : drafts.kubeMethod === 'browser' || drafts.kubeMethod === 'oidc'
+                ? '▶  Log in (browser)'
+                : '▶  Log in',
           variant: 'primary',
           hover: { scope: 'hv-kube-login', color: THEME.onColor, backgroundColor: THEME.accent },
           onPress: () => startKubeLogin(false),
@@ -122,7 +223,7 @@ export function registerPanel(on) {
       // who answers at that address collect the login, so it is never on the default path.
       ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.last.badCert && !kubeLogin.last.insecure && kubeLogin.status !== 'logging'
         ? [
-            [
+            spaced([
               Text({ color: THEME.warn, wrap: 'wrap', children: ['The cluster certificate is not trusted. Only continue if you know this cluster.'] }),
               Button({
                 key: 'kube-login-insecure',
@@ -131,7 +232,7 @@ export function registerPanel(on) {
                 hover: { scope: 'hv-kube-login-insecure', color: THEME.onColor, backgroundColor: THEME.danger },
                 onPress: () => startKubeLogin(true),
               }),
-            ],
+            ]),
           ]
         : []),
     ])

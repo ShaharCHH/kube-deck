@@ -1,6 +1,6 @@
 import { approveActive, approveAll, setApprove } from './approve.js'
 import { aws, awsSso, checkAws, loginAws, loginAwsSso, resolveAws } from './aws.js'
-import { cluster, discoverKubeconfigs, kubeLogin, levelLabel, loginKube, refreshCluster } from './cluster.js'
+import { cluster, discoverKubeconfigs, kubeLogin, levelLabel, loginKube, loginKubeOidc, refreshCluster } from './cluster.js'
 import { APPROVE_MINUTES, AUDIT_DIR, PANE, PANE_COLUMNS, TODO_TOOL, newId } from './config.js'
 import { registerGuard } from './guard.js'
 import { registerPanel } from './panel.js'
@@ -87,7 +87,10 @@ export function register(on) {
           wanted.kubeLogin = false
           const insecure = wanted.kubeInsecure
           wanted.kubeInsecure = false
-          await loginKube($, '', insecure)
+          const method = wanted.kubeMethod
+          wanted.kubeMethod = 'browser'
+          if (method === 'oidc') await loginKubeOidc($, '', insecure)
+          else await loginKube($, '', insecure, method === 'token' || method === 'password' ? method : 'web')
         }
         if (wanted.awsSso) {
           wanted.awsSso = false
