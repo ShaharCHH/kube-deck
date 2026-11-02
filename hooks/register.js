@@ -42,7 +42,7 @@ export function register(on) {
     })
     await $.command.register({
       name: 'kube-login',
-      description: 'Log in to a cluster in the browser: /kube-login https://api.mycluster.example.com:6443 (no URL = the current cluster)',
+      description: 'Log in to a cluster in the browser: /kube-login https://api.mycluster.example.com:6443 (no URL = the current cluster; add --insecure for a certificate you do not trust)',
       immediate: true,
     })
     await $.command.register({
@@ -85,7 +85,9 @@ export function register(on) {
         }
         if (wanted.kubeLogin) {
           wanted.kubeLogin = false
-          await loginKube($)
+          const insecure = wanted.kubeInsecure
+          wanted.kubeInsecure = false
+          await loginKube($, '', insecure)
         }
         if (wanted.awsSso) {
           wanted.awsSso = false
@@ -246,7 +248,10 @@ export function register(on) {
   })
 
   on('command.run', { command: 'kube-login' }, async ($, e) => {
-    await loginKube($, String(e.args ?? '').trim())
+    // "--insecure" anywhere in the args skips the certificate check for this login only
+    const args = String(e.args ?? '').trim()
+    const insecure = /(^|\s)--insecure(\s|$)/.test(args)
+    await loginKube($, args.replace(/(^|\s)--insecure(?=\s|$)/g, ' ').trim(), insecure)
     await refreshCluster($)
     return { text: (cluster.known ? cluster.name + ' (' + levelLabel() + ')' : 'no cluster found') + (kubeLogin.last && !kubeLogin.last.ok ? ' | last login failed: ' + kubeLogin.last.note : '') }
   })

@@ -55,9 +55,10 @@ export function registerPanel(on) {
       })
 
     // ---- cluster
-    const startKubeLogin = () => {
+    const startKubeLogin = (insecure = false) => {
       if (kubeLogin.status === 'logging' || wanted.kubeLogin) return
       wanted.kubeLogin = true
+      wanted.kubeInsecure = insecure
       setKubeLogin({ status: 'logging', last: null })
       $.ui.invalidate('ui.render')
     }
@@ -99,7 +100,7 @@ export function registerPanel(on) {
               onInput: (value) => {
                 drafts.kubeServer = value
               },
-              onSubmit: () => startKubeLogin(),
+              onSubmit: () => startKubeLogin(false),
             }),
           ],
         }),
@@ -108,11 +109,27 @@ export function registerPanel(on) {
           label: kubeLogin.status === 'logging' ? '…  Approve in your browser' : '▶  Log in (browser)',
           variant: 'primary',
           hover: { scope: 'hv-kube-login', color: THEME.onColor, backgroundColor: THEME.accent },
-          onPress: () => startKubeLogin(),
+          onPress: () => startKubeLogin(false),
         }),
       ],
       ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.status !== 'logging'
         ? [[Text({ color: THEME.warn, wrap: 'wrap', children: [kubeLogin.last.secs == null ? kubeLogin.last.note : 'Last login attempt ended after ' + kubeLogin.last.secs + 's: ' + (kubeLogin.last.note || 'no detail')] })]]
+        : []),
+      // Offered only after a certificate failure, as its own button: skipping the check lets anyone
+      // who answers at that address collect the login, so it is never on the default path.
+      ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.last.badCert && !kubeLogin.last.insecure && kubeLogin.status !== 'logging'
+        ? [
+            [
+              Text({ color: THEME.warn, wrap: 'wrap', children: ['The cluster certificate is not trusted. Only continue if you know this cluster.'] }),
+              Button({
+                key: 'kube-login-insecure',
+                label: '⚠  Log in anyway (skip certificate check)',
+                variant: 'primary',
+                hover: { scope: 'hv-kube-login-insecure', color: THEME.onColor, backgroundColor: THEME.danger },
+                onPress: () => startKubeLogin(true),
+              }),
+            ],
+          ]
         : []),
     ])
 
