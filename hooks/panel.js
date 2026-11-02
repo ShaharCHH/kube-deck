@@ -454,15 +454,20 @@ export function registerPanel(on) {
                   }),
                 ],
               }),
-              Button({
-                key: 'load-' + t.id,
-                label: '↵ load',
-                plain: true,
-                dimColor: true,
-                hover: { scope: 'hv-load-' + t.id, color: THEME.accent },
-                // puts the task in the prompt box, replacing whatever draft is there, for the person to edit and send
-                onPress: () => $.prompt.fill({ text: t.text }),
-              }),
+              // open tasks only: a finished one has nothing left to send
+              ...(t.done
+                ? []
+                : [
+                    Button({
+                      key: 'load-' + t.id,
+                      label: '↵ load',
+                      plain: true,
+                      dimColor: true,
+                      hover: { scope: 'hv-load-' + t.id, color: THEME.accent },
+                      // puts the task in the prompt box, replacing whatever draft is there, for the person to edit and send
+                      onPress: () => $.prompt.fill({ text: t.text }),
+                    }),
+                  ]),
               Button({
                 key: 'del-' + t.id,
                 label: '✕',

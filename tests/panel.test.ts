@@ -87,6 +87,11 @@ test('each task has a load button that puts its text in the prompt box', async (
   await ui.press({ key: load.key })
   expect(filled).toEqual(['drain worker-3'])
 
+  // a finished task has no load button
+  const box = (await ui.find({ type: 'Button', text: /☐/ })) as any
+  await ui.press({ key: box.key })
+  expect(await ui.find({ type: 'Button', text: /load/ })).toBeUndefined()
+
   const rest = (await ui.find({ type: 'Button', text: /✕/ })) as any
   await ui.press({ key: rest.key })
   await ui.unmount()
