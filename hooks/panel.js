@@ -6,7 +6,7 @@ import { PANE, PANE_COLUMNS, THEME, newId } from './config.js'
 import { checkReach, reach } from './reach.js'
 import { apiTarget } from './targets.js'
 import { drafts, secrets, wanted } from './shared.js'
-import { mutateTodos, repoName, todos } from './todos.js'
+import { SPLIT_STORE_NOTE, mutateTodos, otherStores, repoName, todos } from './todos.js'
 
 // Text typed in the panel's add field, kept so a redraw doesn't wipe a half-typed task.
 let draft = ''
@@ -505,6 +505,7 @@ export function registerPanel(on) {
       Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [doneCount + '/' + todos.length] }),
       THEME.brand,
       [
+        ...(otherStores.length > 0 ? [[Text({ color: THEME.warn, children: ['⚠ ' + SPLIT_STORE_NOTE] })]] : []),
         [
           Input({
             key: 'new-todo',
