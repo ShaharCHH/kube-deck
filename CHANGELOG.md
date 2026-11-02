@@ -4,7 +4,10 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-02
+
 ### Added
+- **Log in anyway for an untrusted certificate:** after a login fails on the cluster's certificate, the cluster card offers a separate `Log in anyway (skip certificate check)` button. It is never on the default path.
 - **API reachability** on the cluster card: `reachable` / `UNREACHABLE` from a TCP connect to the kubeconfig's server address, with a hint when it points at this machine (a tunnel that ended). Optional `WATCH_PORTS` in `hooks/config.js` for extra addresses.
 - **Add a kubeconfig by path** in the cluster card: checked, copied into `~/.kube` with mode 600, selected.
 - **SSO login for plain Kubernetes** (OIDC through the `kubectl oidc-login` plugin): issuer URL and client id in the cluster card, written into a kubeconfig of its own. Needs `kubectl`, the plugin and Kubernetes 1.28+.
@@ -35,5 +38,6 @@ First public release.
 - **To-do list** per repo, which Claude can add to on its own through the `mcp__kube-deck__todo` tool.
 - MIT license, a marketplace file for `/plugin install kube-deck --marketplace ShaharCHH/kube-deck`, and tests for the classifier, the redaction and the engine hooks.
 
-[Unreleased]: https://github.com/ShaharCHH/kube-deck/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ShaharCHH/kube-deck/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ShaharCHH/kube-deck/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ShaharCHH/kube-deck/releases/tag/v0.1.0
