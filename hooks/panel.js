@@ -8,6 +8,8 @@ import { mutateTodos, repoName, todos } from './todos.js'
 
 // Text typed in the panel's add field, kept so a redraw doesn't wipe a half-typed task.
 let draft = ''
+// Cards the person folded down to their header, by card id.
+const folded = {}
 
 export function registerPanel(on) {
   // ---- the panel: cluster, guard, todos, recent cluster commands, as bordered cards.
@@ -37,7 +39,9 @@ export function registerPanel(on) {
     const spaced = (children) => Object.assign(children, { spaced: true })
     // A card: coloured border, a header row (title left, status right), then groups of rows
     // separated by a blank line so the card breathes.
-    const card = (title, right, color, groups) =>
+    // The title is a button: press it to fold the card down to its header (kept in `folded`, which a
+    // plugin reload resets).
+    const card = (id, title, right, color, groups) =>
       Box({
         flexDirection: 'column',
         borderStyle: 'round',
@@ -49,11 +53,21 @@ export function registerPanel(on) {
             flexDirection: 'row',
             justifyContent: 'space-between',
             children: [
-              Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [title] }),
+              Button({
+                key: 'fold-' + id,
+                plain: true,
+                onPress: () => {
+                  folded[id] = !folded[id]
+                  $.ui.invalidate('ui.render')
+                },
+                children: [
+                  Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [(folded[id] ? '▸ ' : '▾ ') + title] }),
+                ],
+              }),
               right ?? spacer(),
             ],
           }),
-          ...groups.map((g) => Box({ flexDirection: 'column', rowGap: g.spaced ? 1 : 0, children: g })),
+          ...(folded[id] ? [] : groups).map((g) => Box({ flexDirection: 'column', rowGap: g.spaced ? 1 : 0, children: g })),
         ],
       })
 
@@ -75,7 +89,7 @@ export function registerPanel(on) {
           : cluster.level === 'unlisted'
             ? chip('UNLISTED', THEME.warn)
             : chip('non-prod', THEME.ok)
-    const clusterCard = card(cluster.known ? cluster.name : 'no cluster found', badge, level, [
+    const clusterCard = card('cluster', cluster.known ? cluster.name : 'no cluster found', badge, level, [
       [field('project', cluster.namespace || 'default', THEME.text)],
       ...(kubeconfigs.length > 0
         ? [
@@ -254,7 +268,7 @@ export function registerPanel(on) {
       $.ui.invalidate('ui.render')
     }
     const awsColor = aws.status === 'logging' ? THEME.accent : aws.status === 'ok' ? THEME.ok : aws.status === 'expired' ? THEME.danger : aws.status === 'error' ? THEME.warn : THEME.muted
-    const awsCard = card('AWS', AWS_BADGE[aws.status], awsColor, [
+    const awsCard = card('aws', 'AWS', AWS_BADGE[aws.status], awsColor, [
       [
         field('profile', aws.profile || '(none)', aws.profile ? THEME.text : THEME.muted),
         ...(aws.region ? [field('region', aws.region, THEME.text)] : []),
@@ -363,6 +377,7 @@ export function registerPanel(on) {
 
     // ---- guard
     const guardCard = card(
+      'guard',
       'Guard',
       armed ? chip('ON · ' + mmss(approveUntil - now), THEME.warn) : Text({ color: THEME.ok, children: ['● guarding'] }),
       armed ? THEME.warn : THEME.accent,
@@ -466,6 +481,7 @@ export function registerPanel(on) {
     const withDividers = (list) => list.flatMap((t, i) => (i === 0 ? [taskRow(t)] : [divider(t.id), taskRow(t)]))
 
     const todoCard = card(
+      'todo',
       'Todo' + (repoName ? ' · ' + repoName : ''),
       Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [bar + doneCount + '/' + todos.length] }),
       THEME.brand,
@@ -488,9 +504,9 @@ export function registerPanel(on) {
               }),
               Button({
                 key: 'add-todo',
-                label: '+ Add',
-                variant: 'primary',
-                hover: { scope: 'hv-add', color: THEME.onColor, backgroundColor: THEME.brand },
+                label: '+ add',
+                plain: true,
+                hover: { scope: 'hv-add', color: THEME.brand },
                 onPress: () => addTodo(draft),
               }),
             ],
@@ -513,6 +529,7 @@ export function registerPanel(on) {
       doneCount === 0
         ? null
         : card(
+            'done',
             'Done',
             Text({ color: THEME.ok, children: [doneCount + ' finished'] }),
             THEME.ok,
@@ -537,7 +554,7 @@ export function registerPanel(on) {
       auto: ['AUTO', THEME.warn],
       'non-prod': ['non-prod', THEME.muted],
     }
-    const activityCard = card('Cluster commands', undefined, THEME.muted, [
+    const activityCard = card('commands', 'Cluster commands', undefined, THEME.muted, [
       activity.length === 0
         ? [Text({ color: THEME.muted, italic: true, children: ['None this session.'] })]
         : activity.map((a) => {
