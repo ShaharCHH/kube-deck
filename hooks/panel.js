@@ -61,7 +61,7 @@ export function registerPanel(on) {
                   $.ui.invalidate('ui.render')
                 },
                 children: [
-                  Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [(folded[id] ? '▸ ' : '▾ ') + title] }),
+                  Text({ bold: true, color: color ?? THEME.text, wrap: 'truncate-middle', children: [(folded[id] ? '▶ ' : '▼ ') + title] }),
                 ],
               }),
               right ?? spacer(),

@@ -130,7 +130,7 @@ test('finished tasks move to the Done card, which holds Clear done; open tasks a
     const box = (await ui.find({ type: 'Button', text: /☐/ })) as any
     await ui.press({ key: box.key })
     expect(await ui.find({ key: 'clear-done' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^▾ Done$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▼ Done$/ })).toBeDefined()
 
     await ui.press({ key: 'clear-done' })
     expect(await ui.find({ key: 'clear-done' })).toBeUndefined()
