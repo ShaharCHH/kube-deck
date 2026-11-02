@@ -432,7 +432,6 @@ export function registerPanel(on) {
     const open = todos.filter((t) => !t.done)
     const finished = todos.filter((t) => t.done)
     const doneCount = finished.length
-    const bar = todos.length === 0 ? '' : '▰'.repeat(doneCount) + '▱'.repeat(open.length) + ' '
     const addTodo = async (value) => {
       const text = String(value ?? '').trim()
       if (!text) return
@@ -503,7 +502,7 @@ export function registerPanel(on) {
     const todoCard = card(
       'todo',
       'Todo' + (repoName ? ' · ' + repoName : ''),
-      Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [bar + doneCount + '/' + todos.length] }),
+      Text({ color: doneCount === todos.length && todos.length > 0 ? THEME.ok : THEME.muted, children: [doneCount + '/' + todos.length] }),
       THEME.brand,
       [
         [

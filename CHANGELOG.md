@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Changed
+- **Todo card:** the `▰▱` progress bar is gone; the header shows only `done/total`. The bar had one block per todo, so a long list ran past the card border.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added
