@@ -780,3 +780,106 @@ test('add kubeconfig: a file that is not a kubeconfig, a missing file, a relativ
   expect(await ui.find({ type: 'Text', text: /already exists in ~\/\.kube/ })).toBeDefined()
   await ui.unmount()
 })
+
+// SSO for plain Kubernetes: kubectl writes an exec-plugin kubeconfig, `auth whoami` triggers the browser sign-in.
+function oidcWorld(on: any, env: Record<string, string>, opts: { pluginInstalled?: boolean; whoami?: { exitCode: number; stderr: string } } = {}) {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  let written = false
+  on('fs.list', () => ({ value: written ? [{ name: 'k8s-x-example-com.kubeconfig', kind: 'file' }] : [] }))
+  on('fs.read', () => ({ value: 'apiVersion: v1\nclusters: []\n' }))
+  const ran: any[] = []
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] !== 'kubectl') return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
+    ran.push(e)
+    if (e.argv[1] === 'oidc-login') {
+      return { value: { exitCode: opts.pluginInstalled === false ? 1 : 0, stdout: '', stderr: 'unknown command' } }
+    }
+    if (e.argv[2] === 'set-cluster') written = true
+    if (e.argv[1] === 'auth') return { value: { exitCode: opts.whoami?.exitCode ?? 0, stdout: '', stderr: opts.whoami?.stderr ?? '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  return Object.assign(ran, { clock })
+}
+
+async function fillOidc(ui: any, issuer: string, client: string) {
+  await ui.select({ key: 'kube-method', value: 'oidc' })
+  await ui.input({ key: 'kube-server', text: 'api.k8s.x.example.com:6443', kind: 'change' } as any)
+  await ui.input({ key: 'kube-oidc-issuer', text: issuer, kind: 'change' } as any)
+  await ui.input({ key: 'kube-oidc-client', text: client, kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' })
+}
+
+test('SSO login: writes an oidc-login exec kubeconfig in a file of its own, signs in, then switches to it', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = oidcWorld(on, env)
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+  await fillOidc(ui, 'https://login.example.com/realms/prod/', 'kubernetes')
+  await ran.clock.advance(1500)
+
+  const file = '/home/t/.kube/k8s-x-example-com.kubeconfig'
+  expect(ran.every((e: any) => e.init.env.KUBECONFIG === file)).toBe(true) // never touches another file
+  const cmds = ran.map((e: any) => e.argv.slice(1, 3).join(' '))
+  expect(cmds).toEqual(['oidc-login --version', 'config set-cluster', 'config set-credentials', 'config set-context', 'config use-context', 'auth whoami'])
+  expect(ran[1].argv).toContain('--server=https://api.k8s.x.example.com:6443')
+  expect(ran[1].argv).toContain('--insecure-skip-tls-verify=false')
+  expect(ran[2].argv).toContain('--exec-arg=--oidc-issuer-url=https://login.example.com/realms/prod') // trailing / dropped
+  expect(ran[2].argv).toContain('--exec-arg=--oidc-client-id=kubernetes')
+  expect(ran[2].argv).toContain('--exec-command=kubectl')
+  expect(env.KUBECONFIG).toBe(file)
+  await ui.unmount()
+})
+
+test('SSO login: without the oidc-login plugin it says how to install it and writes nothing', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/old.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = oidcWorld(on, env, { pluginInstalled: false })
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+  await fillOidc(ui, 'https://login.example.com', 'kubernetes')
+  await ran.clock.advance(1500)
+
+  expect(ran.length).toBe(1) // only the version check
+  expect(JSON.stringify(await ui.find({ type: 'Text', text: /kubectl oidc-login is not installed/ }))).toContain('krew')
+  expect(env.KUBECONFIG).toBe('/k/old.kubeconfig')
+  await ui.unmount()
+})
+
+test('SSO login: a failed sign-in switches nothing; an untrusted certificate offers "anyway", which sets the flag', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/old.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = oidcWorld(on, env, { whoami: { exitCode: 1, stderr: 'tls: failed to verify certificate: x509: unknown authority' } })
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+  await fillOidc(ui, 'https://login.example.com', 'kubernetes')
+  await ran.clock.advance(1500)
+  expect(env.KUBECONFIG).toBe('/k/old.kubeconfig')
+  expect(await ui.find({ key: 'kube-login-insecure' })).toBeDefined()
+
+  await ui.press({ key: 'kube-login-insecure' })
+  await ran.clock.advance(1500)
+  const clusters = ran.filter((e: any) => e.argv[2] === 'set-cluster')
+  expect(clusters.at(-1).argv).toContain('--insecure-skip-tls-verify=true')
+  await ui.unmount()
+})
+
+test('SSO login: an issuer or client id that is not plain text runs nothing', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = oidcWorld(on, env)
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+  await fillOidc(ui, 'http://login.example.com', 'kubernetes') // not https
+  await ran.clock.advance(1500)
+  await fillOidc(ui, 'https://login.example.com; rm -rf ~', 'kubernetes')
+  await ran.clock.advance(1500)
+  await fillOidc(ui, 'https://login.example.com', '--x')
+  await ran.clock.advance(1500)
+  expect(ran.length).toBe(0)
+  expect(env.KUBECONFIG).toBe('')
+  await ui.unmount()
+})

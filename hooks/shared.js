@@ -1,7 +1,7 @@
 // Typed-in drafts and "login wanted" flags that more than one module reads or writes.
 // Plain objects, so a module can change a property (an imported name cannot be reassigned).
-// kubeMethod: which login the cluster card shows (browser | token | password); kubeAdd: path typed in "Add kubeconfig".
-export const drafts = { kubeServer: '', kubeMethod: 'browser', kubeAdd: '', ssoUrl: '', ssoRegion: '' }
+// kubeMethod: which login the cluster card shows (browser | oidc | token | password); kubeAdd: path typed in "Add kubeconfig".
+export const drafts = { kubeServer: '', kubeMethod: 'browser', kubeAdd: '', oidcIssuer: '', oidcClient: '', ssoUrl: '', ssoRegion: '' }
 // What was typed for a token or password login. The panel cannot hide typed text, so these live only in
 // this object (never in $.state, $.store, the audit log or a toast) and are emptied once the login works.
 export const secrets = { user: '', pass: '', token: '' }
