@@ -103,7 +103,7 @@ The panel opens by itself, unfocused. Beside the transcript it needs a wide full
 
 - Cluster name, project (namespace) and a badge: red `PROD`, green `non-prod`, amber `UNLISTED` (the name matches neither list, so it is treated as prod), or `STRICT` (the cluster can't be read).
 - **`kubeconfig` dropdown:** the files in `~/.kube` that read like a kubeconfig, plus the one in `KUBECONFIG`.
-- **Cluster login:** type the API URL (`api.mycluster.example.com:6443`, `https://` is added for you) and press `Log in (browser)`. It runs `oc login --web --server=<url>` into its own file, `~/.kube/<cluster>.kubeconfig`, so no kubeconfig has to exist and no other file is touched. It waits up to 10 minutes for you to approve in the browser, then switches to that file. No password or token passes through the panel; for token or password logins use a terminal. Needs an `oc` and a cluster that support `--web`. A failed login says why on the card.
+- **Cluster login:** type the API URL (`api.mycluster.example.com:6443`, `https://` is added for you) and press `Log in (browser)`. It runs `oc login --web --server=<url>` into its own file, `~/.kube/<cluster>.kubeconfig`, so no kubeconfig has to exist and no other file is touched. It waits up to 10 minutes for you to approve in the browser, then switches to that file. No password or token passes through the panel; for token or password logins use a terminal. Needs an `oc` and a cluster that support `--web`. A failed login says why on the card. If it fails because the cluster's certificate is not trusted (self-signed, private CA), the card offers `Log in anyway (skip certificate check)`, or use `/kube-login <url> --insecure`. That adds `--insecure-skip-tls-verify`: the browser login still happens, but kube-deck can no longer tell the real cluster from an impostor at that address, and the setting is saved in that cluster's kubeconfig file. Prefer fixing trust (`oc login --certificate-authority=<ca.crt>` in a terminal) for anything long-lived.
 
 ### AWS card
 
@@ -192,6 +192,14 @@ Everything is in `hooks/config.js`:
 - Redaction does not cover env values in pod specs, ConfigMaps, logs, `oc exec … env`, `cat` of a kubeconfig, or anything that isn't recognisably a secret read. It covers Bash cluster commands only, not other tools.
 - The audit log is best effort: a failed write shows a toast and does not block the command.
 - Claude Code's own permission prompt still runs after kube-deck's. Allow rules for read-only commands avoid double prompts.
+- **The guard is only on while kube-deck is loaded.** Claude Code runs every mod in one shared worker thread. If another mod crashes it, only that mod is unloaded; kube-deck stays on and denies the command that was running. If the worker keeps stopping and Claude Code cannot blame one mod, the docs say it unloads every non-built-in mod until you run `/reload-plugins` or start a new session. (I could not reproduce that last case, so it is documented behavior, not something I have seen.) While kube-deck is off, nothing here asks about prod, and only your own Claude Code permissions protect it.
+- **Back the guard up with Claude Code's own rules.** A permission rule keeps working when the mod is off. In `~/.claude/settings.json`:
+
+  ```json
+  { "permissions": { "ask": ["Bash(oc delete *)", "Bash(kubectl delete *)"] } }
+  ```
+
+  Avoid broad allow rules such as `Bash(oc *)`. With one of those and kube-deck off, an `oc delete` on prod runs with no prompt. Run `/permissions` to see which rules apply to you.
 - The profile name is only used if it is a plain name (letters, digits, `_.@+=,-`), since it goes into a command line.
 
 ## Development
