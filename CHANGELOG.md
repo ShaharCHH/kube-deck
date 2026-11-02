@@ -4,6 +4,12 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Added
+- **Load button** on every to-do: `↵ load` puts the task's text in the prompt box (replacing the draft) so you can edit and send it.
+
+### Fixed
+- Stacked inputs and buttons (cluster login, AWS SSO setup) no longer touch; the to-do input's `add` label is now an `Enter` key hint, so it no longer looks like a second, dead Add button.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.

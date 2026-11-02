@@ -72,6 +72,26 @@ test('without a cluster: the todo and cluster-login cards draw, not the guard', 
   }
 })
 
+test('each task has a load button that puts its text in the prompt box', async ($, on) => {
+  setup(on, false)
+  const filled: string[] = []
+  on('prompt.fill', (_$: any, e: any) => {
+    filled.push(e.text)
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+
+  const ui = await mount($, 'terminal')
+  await ui.input({ key: 'new-todo', text: 'drain worker-3' })
+  const load = (await ui.find({ type: 'Button', text: /load/ })) as any
+  await ui.press({ key: load.key })
+  expect(filled).toEqual(['drain worker-3'])
+
+  const rest = (await ui.find({ type: 'Button', text: /✕/ })) as any
+  await ui.press({ key: rest.key })
+  await ui.unmount()
+})
+
 test('finished tasks move to the Done card, which holds Clear done; open tasks are divided', async ($, on) => {
   setup(on, false)
   await $.command.run({ command: 'ctx', args: '' })

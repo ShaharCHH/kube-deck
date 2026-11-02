@@ -132,7 +132,7 @@ A pick sets `AWS_PROFILE` / `KUBECONFIG` for the Claude Code process, but that a
 ### Guard, to-do and commands cards
 
 - **Guard:** the `Approve all` button (hotkey `a`) with a countdown while it is on.
-- **Todo / Done:** an add field, `☐` / `☑` per item, `x` to delete, `Clear done`, and a `done/total` count.
+- **Todo / Done:** an add field, `☐` / `☑` per item, `↵ load` to put the task in the prompt box, `x` to delete, `Clear done`, and a `done/total` count.
 - **Cluster commands:** the last 8 cluster-changing commands with their outcome.
 
 Outside cluster work (no cluster readable, no cluster command run, approve-all off) the Cluster, AWS and Todo cards show; Guard and Cluster commands stay hidden.

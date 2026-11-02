@@ -32,6 +32,9 @@ export function registerPanel(on) {
           Box({ flexGrow: 1, children: [Text({ color: valueColor, wrap: 'truncate-end', children: [value] })] }),
         ],
       })
+    // A group of stacked inputs and buttons: marked so the card puts a blank line between them
+    // (the terminal draws a Button as one line, so two in a column touch).
+    const spaced = (children) => Object.assign(children, { spaced: true })
     // A card: coloured border, a header row (title left, status right), then groups of rows
     // separated by a blank line so the card breathes.
     const card = (title, right, color, groups) =>
@@ -50,7 +53,7 @@ export function registerPanel(on) {
               right ?? spacer(),
             ],
           }),
-          ...groups.map((g) => Box({ flexDirection: 'column', children: g })),
+          ...groups.map((g) => Box({ flexDirection: 'column', rowGap: g.spaced ? 1 : 0, children: g })),
         ],
       })
 
@@ -85,7 +88,7 @@ export function registerPanel(on) {
             ],
           ]
         : []),
-      [
+      spaced([
         Box({
           flexDirection: 'row',
           columnGap: 1,
@@ -110,7 +113,7 @@ export function registerPanel(on) {
           hover: { scope: 'hv-kube-login', color: THEME.onColor, backgroundColor: THEME.accent },
           onPress: () => startKubeLogin(),
         }),
-      ],
+      ]),
       ...(kubeLogin.last && !kubeLogin.last.ok && kubeLogin.status !== 'logging'
         ? [[Text({ color: THEME.warn, wrap: 'wrap', children: [kubeLogin.last.secs == null ? kubeLogin.last.note : 'Last login attempt ended after ' + kubeLogin.last.secs + 's: ' + (kubeLogin.last.note || 'no detail')] })]]
         : []),
@@ -179,7 +182,7 @@ export function registerPanel(on) {
             ],
           ]
         : []),
-      [
+      spaced([
         Input({
           key: 'aws-sso-url',
           label: 'sso',
@@ -209,7 +212,7 @@ export function registerPanel(on) {
           hover: { scope: 'hv-aws-sso', color: THEME.onColor, backgroundColor: THEME.accent },
           onPress: () => startAwsSso(),
         }),
-      ],
+      ]),
       ...(awsSso.choices.length > 0
         ? [
             [
@@ -298,7 +301,7 @@ export function registerPanel(on) {
         children: [
           Box({
             flexDirection: 'row',
-            columnGap: 1,
+            columnGap: 2,
             children: [
               Button({
                 key: 'done-' + t.id,
@@ -317,6 +320,15 @@ export function registerPanel(on) {
                     children: [t.text],
                   }),
                 ],
+              }),
+              Button({
+                key: 'load-' + t.id,
+                label: '↵ load',
+                plain: true,
+                dimColor: true,
+                hover: { scope: 'hv-load-' + t.id, color: THEME.accent },
+                // puts the task in the prompt box, replacing whatever draft is there, for the person to edit and send
+                onPress: () => $.prompt.fill({ text: t.text }),
               }),
               Button({
                 key: 'del-' + t.id,
@@ -350,7 +362,7 @@ export function registerPanel(on) {
                 label: 'new',
                 placeholder: 'type a task, Enter',
                 value: draft,
-                submitLabel: 'add',
+                submitLabel: 'Enter', // a key hint, not a button: the + Add button next to it is the clickable one
                 onInput: (value) => {
                   draft = value
                 },
