@@ -16,7 +16,7 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 - Documented, and checked against Claude Code 2.1.310 (2026-10-25, fake `oc`, no cluster): when another mod crashes the shared hooks worker mid-command, only that mod is unloaded and the guard's `.catch` denies the command that was running ("The kube-deck guard failed … this command was not run"). The unload of every non-built-in mod after 3 unattributed crashes comes from the Claude Code docs and was not reproduced.
 
 ### Fixed
-- Stacked inputs and buttons (cluster login, AWS SSO setup) no longer touch; the to-do input's `add` label is now an `Enter` key hint and `+ add` is plain text rather than a bracketed button, so the todo card no longer shows two Add buttons.
+- Stacked inputs and buttons (cluster login, AWS SSO setup) no longer touch; the to-do card no longer has a separate `+ Add` button next to the input; the input's own `add` label (Enter) is the only Add.
 
 ## [0.1.0] - 2026-10-20
 

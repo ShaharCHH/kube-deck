@@ -487,29 +487,16 @@ export function registerPanel(on) {
       THEME.brand,
       [
         [
-          Box({
-            flexDirection: 'row',
-            columnGap: 1,
-            children: [
-              Input({
-                key: 'new-todo',
-                label: 'new',
-                placeholder: 'type a task, Enter',
-                value: draft,
-                submitLabel: 'Enter', // a key hint, not a button: the + Add button next to it is the clickable one
-                onInput: (value) => {
-                  draft = value
-                },
-                onSubmit: addTodo,
-              }),
-              Button({
-                key: 'add-todo',
-                label: '+ add',
-                plain: true,
-                hover: { scope: 'hv-add', color: THEME.brand },
-                onPress: () => addTodo(draft),
-              }),
-            ],
+          Input({
+            key: 'new-todo',
+            label: 'new',
+            placeholder: 'type a task, Enter',
+            value: draft,
+            submitLabel: 'add',
+            onInput: (value) => {
+              draft = value
+            },
+            onSubmit: addTodo,
           }),
         ],
         open.length === 0
