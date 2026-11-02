@@ -72,6 +72,47 @@ test('without a cluster: the todo and cluster-login cards draw, not the guard', 
   }
 })
 
+test('each task has a load button that puts its text in the prompt box', async ($, on) => {
+  setup(on, false)
+  const filled: string[] = []
+  on('prompt.fill', (_$: any, e: any) => {
+    filled.push(e.text)
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+
+  const ui = await mount($, 'terminal')
+  await ui.input({ key: 'new-todo', text: 'drain worker-3' })
+  const load = (await ui.find({ type: 'Button', text: /load/ })) as any
+  await ui.press({ key: load.key })
+  expect(filled).toEqual(['drain worker-3'])
+
+  // a finished task has no load button
+  const box = (await ui.find({ type: 'Button', text: /☐/ })) as any
+  await ui.press({ key: box.key })
+  expect(await ui.find({ type: 'Button', text: /load/ })).toBeUndefined()
+
+  const rest = (await ui.find({ type: 'Button', text: /✕/ })) as any
+  await ui.press({ key: rest.key })
+  await ui.unmount()
+})
+
+test('a card folds down to its header when its title is pressed, and opens again', async ($, on) => {
+  setup(on, false)
+  await $.command.run({ command: 'ctx', args: '' })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount($, surface)
+    expect(await ui.find({ key: 'new-todo' })).toBeDefined()
+    await ui.press({ key: 'fold-todo' })
+    expect(await ui.find({ key: 'new-todo' })).toBeUndefined()
+    expect(await ui.find({ key: 'fold-todo' })).toBeDefined() // the header stays
+    await ui.press({ key: 'fold-todo' })
+    expect(await ui.find({ key: 'new-todo' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('finished tasks move to the Done card, which holds Clear done; open tasks are divided', async ($, on) => {
   setup(on, false)
   await $.command.run({ command: 'ctx', args: '' })
@@ -89,7 +130,7 @@ test('finished tasks move to the Done card, which holds Clear done; open tasks a
     const box = (await ui.find({ type: 'Button', text: /☐/ })) as any
     await ui.press({ key: box.key })
     expect(await ui.find({ key: 'clear-done' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Done$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▼ Done$/ })).toBeDefined()
 
     await ui.press({ key: 'clear-done' })
     expect(await ui.find({ key: 'clear-done' })).toBeUndefined()

@@ -101,6 +101,8 @@ Mods are not sandboxed. Read the code before you install it, and run `claude plu
 
 The panel opens by itself, unfocused. Beside the transcript it needs a wide fullscreen terminal (144 columns or more); otherwise it waits, and `/deck` opens it above the prompt. `Ctrl+X` then `Tab` focuses it.
 
+Every card's title is a button: press it (`▼` open, `▶` folded) to fold the card down to its header. Folds last until the plugin reloads.
+
 ### Cluster card
 
 - Cluster name, project (namespace) and a badge: red `PROD`, green `non-prod`, amber `UNLISTED` (the name matches neither list, so it is treated as prod), or `STRICT` (the cluster can't be read).
@@ -138,7 +140,7 @@ A pick sets `AWS_PROFILE` / `KUBECONFIG` for the Claude Code process, but that a
 ### Guard, to-do and commands cards
 
 - **Guard:** the `Approve all` button (hotkey `a`) with a countdown while it is on.
-- **Todo / Done:** an add field, `☐` / `☑` per item, `x` to delete, `Clear done`, and a `done/total` count.
+- **Todo / Done:** an add field (Enter adds), `☐` / `☑` per item, `↵ load` (open tasks) to put the task in the prompt box, `x` to delete, `Clear done`, and a `done/total` count.
 - **Cluster commands:** the last 8 cluster-changing commands with their outcome.
 
 Outside cluster work (no cluster readable, no cluster command run, approve-all off) the Cluster, AWS and Todo cards show; Guard and Cluster commands stay hidden.
