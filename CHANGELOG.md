@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Changed
+- **Todo card:** the `▰▱` progress bar is gone; the header shows only `done/total`. The bar had one block per todo, so a long list ran past the card border.
+
 ### Fixed
 - Todo lists split across two `$.store` files when kube-deck is loaded from two sources (inline and marketplace): the panel and `todo list` now warn when more than one `kube-deck_*` store exists (#19). The lists are not merged.
 
