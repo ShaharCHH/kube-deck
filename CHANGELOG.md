@@ -6,6 +6,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ### Added
 - **API reachability** on the cluster card: `reachable` / `UNREACHABLE` from a TCP connect to the kubeconfig's server address, with a hint when it points at this machine (a tunnel that ended). Optional `WATCH_PORTS` in `hooks/config.js` for extra addresses.
+- **Add a kubeconfig by path** in the cluster card: checked, copied into `~/.kube` with mode 600, selected.
+- **SSO login for plain Kubernetes** (OIDC through the `kubectl oidc-login` plugin): issuer URL and client id in the cluster card, written into a kubeconfig of its own. Needs `kubectl`, the plugin and Kubernetes 1.28+.
+- **Token and user + password cluster logins** next to the browser one (`log in with` picker). Typed values live only in memory, are replaced by `***` in error messages and are emptied after a successful login. The panel cannot hide typed text; see the README.
 
 ### Changed
 - README, under Limits: the guard is only on while kube-deck is loaded, and a suggested Claude Code `ask` rule for `oc delete` / `kubectl delete` backs it up. No code change.
