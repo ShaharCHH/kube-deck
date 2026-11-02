@@ -410,7 +410,7 @@ test('kubeconfig dropdown: lists kubeconfig files only; a pick sets KUBECONFIG, 
 })
 
 function kubeLoginWorld(on: any, env: Record<string, string>, loginResult: { exitCode: number; stderr: string }) {
-  mock.clock(on, { now: 1_000_000 })
+  const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
   on('env.set', (_$: any, e: any) => {
@@ -430,6 +430,7 @@ function kubeLoginWorld(on: any, env: Record<string, string>, loginResult: { exi
     }
     return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
   })
+  ;(ran as any).clock = clock
   return ran
 }
 
@@ -650,5 +651,132 @@ test('AWS SSO: a login that leaves no token says so and adds no profile', async 
   expect(files['/home/t/.aws/config']).not.toContain('[profile')
   const ui = await mount($, 'terminal')
   expect(await ui.find({ type: 'Text', text: /no SSO token was found/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// Token and password logins: typed in the panel, run by the plugin's 1s timer (started by session.start).
+async function startSession($: any, on: any) {
+  on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: undefined }))
+  on('tool.register', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.session.start({ cwd: '/work/my-repo', surface: 'terminal', isInteractive: true })
+}
+
+test('token login: the token reaches oc as --token=, the field empties on success, the token is gone from the field', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+
+  await ui.select({ key: 'kube-method', value: 'token' })
+  await ui.input({ key: 'kube-server', text: 'api.sno.x.example.com:6443', kind: 'change' } as any)
+  await ui.input({ key: 'kube-token', text: 'sha256~TOPSECRET', kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' })
+  await ran.clock.advance(1500)
+
+  expect(ran.length).toBe(1)
+  expect(ran[0].argv).toEqual(['oc', 'login', '--token=sha256~TOPSECRET', '--server=https://api.sno.x.example.com:6443'])
+  expect(ran[0].init.env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig')
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/sno-x-example-com.kubeconfig')
+  expect(JSON.stringify(await ui.find({ key: 'kube-token' }))).not.toContain('TOPSECRET') // emptied after success
+  await ui.unmount()
+})
+
+test('password login: user and password go as --username= / --password=; an error message never echoes them', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '/k/old.kubeconfig', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = kubeLoginWorld(on, env, { exitCode: 1, stderr: 'Login failed for alice with hunter22 (401)' })
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+
+  await ui.select({ key: 'kube-method', value: 'password' })
+  await ui.input({ key: 'kube-server', text: 'api.sno.x.example.com:6443', kind: 'change' } as any)
+  await ui.input({ key: 'kube-user', text: 'alice', kind: 'change' } as any)
+  await ui.input({ key: 'kube-pass', text: 'hunter22', kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' })
+  await ran.clock.advance(1500)
+
+  expect(ran[0].argv).toEqual(['oc', 'login', '--username=alice', '--password=hunter22', '--server=https://api.sno.x.example.com:6443'])
+  const note = JSON.stringify(await ui.find({ type: 'Text', text: /Last login attempt ended/ }))
+  expect(note).toContain('***')
+  expect(note).not.toContain('hunter22')
+  expect(env.KUBECONFIG).toBe('/k/old.kubeconfig') // a failed login switches nothing
+  await ui.unmount()
+})
+
+test('token login: an empty token or one that looks like a flag runs nothing; switching method drops what was typed', async ($, on) => {
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  const ran: any = kubeLoginWorld(on, env, { exitCode: 0, stderr: '' })
+  await startSession($, on)
+  const ui = await mount($, 'terminal')
+
+  await ui.select({ key: 'kube-method', value: 'token' })
+  await ui.input({ key: 'kube-server', text: 'api.sno.x.example.com:6443', kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' }) // no token typed
+  await ran.clock.advance(1500)
+  await ui.input({ key: 'kube-token', text: '--insecure-skip-tls-verify', kind: 'change' } as any)
+  await ui.press({ key: 'kube-login' })
+  await ran.clock.advance(1500)
+  expect(ran.length).toBe(0)
+
+  await ui.select({ key: 'kube-method', value: 'password' })
+  await ui.select({ key: 'kube-method', value: 'token' })
+  expect(JSON.stringify(await ui.find({ key: 'kube-token' }))).not.toContain('insecure')
+  await ui.unmount()
+})
+
+// Add kubeconfig by path
+function addWorld(on: any, files: Record<string, string>, existing: string[] = []) {
+  mock.clock(on, { now: 1_000_000 })
+  mock.store(on)
+  const env: Record<string, string> = { KUBECONFIG: '', HOME: '/home/t', AWS_PROFILE: '' }
+  on('env.get', (_$: any, e: any) => ({ value: env[e.name] }))
+  on('env.set', (_$: any, e: any) => {
+    env[e.name] = e.value
+    return { value: {} }
+  })
+  on('session.root', () => ({ value: '/work/my-repo' }))
+  const copied: string[][] = []
+  on('fs.read', (_$: any, e: any) => {
+    if (e.path in files) return { value: files[e.path] }
+    if (copied.length && e.path === '/home/t/.kube/team.kubeconfig') return { value: 'apiVersion: v1\nclusters: []\n' } // the copy
+    throw new Error('ENOENT')
+  })
+  on('fs.exists', (_$: any, e: any) => ({ value: existing.includes(e.path) }))
+  on('fs.list', () => ({ value: copied.length ? [{ name: 'team.kubeconfig', kind: 'file' }] : [] }))
+  on('process.run', (_$: any, e: any) => {
+    if (e.argv[0] === 'install') {
+      copied.push(e.argv)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: 'no cluster' } }
+  })
+  return { env, copied }
+}
+
+test('add kubeconfig: a file by path is copied into ~/.kube with mode 600 and selected', async ($, on) => {
+  const { env, copied } = addWorld(on, { '/home/t/Downloads/team.kubeconfig': 'apiVersion: v1\nclusters: []\n' })
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+  await ui.input({ key: 'kube-add', text: '~/Downloads/team.kubeconfig', kind: 'submit' } as any)
+  expect(copied).toEqual([['install', '-m', '600', '/home/t/Downloads/team.kubeconfig', '/home/t/.kube/team.kubeconfig']])
+  expect(env.KUBECONFIG).toBe('/home/t/.kube/team.kubeconfig')
+  await ui.unmount()
+})
+
+test('add kubeconfig: a file that is not a kubeconfig, a missing file, a relative path and an existing name copy nothing', async ($, on) => {
+  const { env, copied } = addWorld(
+    on,
+    { '/home/t/a.txt': 'hello', '/home/t/team.kubeconfig': 'apiVersion: v1\n' },
+    ['/home/t/.kube/team.kubeconfig'],
+  )
+  await $.command.run({ command: 'ctx', args: '' })
+  const ui = await mount($, 'terminal')
+  for (const bad of ['~/a.txt', '~/nope.kubeconfig', 'team.kubeconfig', '~/team.kubeconfig']) {
+    await ui.input({ key: 'kube-add', text: bad, kind: 'submit' } as any)
+  }
+  expect(copied.length).toBe(0)
+  expect(env.KUBECONFIG).toBe('')
+  expect(await ui.find({ type: 'Text', text: /already exists in ~\/\.kube/ })).toBeDefined()
   await ui.unmount()
 })

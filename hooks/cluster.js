@@ -1,9 +1,9 @@
 // The cluster on show: which one, prod or not, the kubeconfig dropdown, and the browser login.
 
 import { approveAll, setApprove } from './approve.js'
-import { KUBE_CLI, KUBE_LOGIN_MS, KUBE_SERVER_RE, NONPROD_PATTERNS, PROD_PATTERNS } from './config.js'
+import { KUBE_CLI, KUBE_CRED_LOGIN_MS, KUBE_LOGIN_MS, KUBE_SERVER_RE, NONPROD_PATTERNS, PROD_PATTERNS } from './config.js'
 import { setPicked } from './picked.js'
-import { drafts } from './shared.js'
+import { drafts, secrets } from './shared.js'
 
 // ---------------------------------------------------------------- state
 // Module variables reset on reload; the todo list is reloaded from $.store in session.start.
@@ -16,6 +16,9 @@ export let kubeconfigs = []
 export let kubeconfig = ''
 
 export let kubeLogin = { status: 'idle', last: null }
+
+// Outcome of the last "Add kubeconfig": { ok, note }, shown on the card when it failed.
+export let kubeAdd = { ok: true, note: '' }
 
 // ---------------------------------------------------------------- helpers
 // Helpers that need the engine take `$` as an argument (allowed for top-level functions).
@@ -114,12 +117,13 @@ export async function switchKubeconfig($, path) {
   $.ui.toast('Kubeconfig is now ' + path.split('/').pop() + (wasArmed ? '; approve-all switched off' : ''))
 }
 
-// Logs in to a cluster through the browser (`oc login --web`) into a kubeconfig file of its own,
-// so no kubeconfig has to exist first and no other file is touched. No password or token passes
-// through the panel. `insecure` adds --insecure-skip-tls-verify for a cluster whose certificate is
-// not trusted: the token then goes to whoever answers at that address, so it is never the default;
+// Logs in to a cluster into a kubeconfig file of its own, so no kubeconfig has to exist first and no
+// other file is touched. `method` is 'web' (browser, nothing secret typed), 'token' or 'password'
+// (taken from `secrets`; the panel cannot hide typed text, and `oc` only takes them as arguments,
+// so they are visible in the process list for the seconds the login runs).
+// `insecure` adds --insecure-skip-tls-verify for a cluster whose certificate is not trusted: the token then goes to whoever answers at that address, so it is never the default;
 // the panel offers it only after a login failed with a certificate error. Logging in again to the cluster already in use refreshes that same file.
-export async function loginKube($, typed, insecure = false) {
+export async function loginKube($, typed, insecure = false, method = 'web') {
   // "api.x.example.com:6443" works too: https:// is added when no scheme was typed
   let url = String(typed || drafts.kubeServer || cluster.server || '').trim().replace(/\/+$/, '')
   if (url && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url)) url = 'https://' + url
@@ -134,6 +138,13 @@ export async function loginKube($, typed, insecure = false) {
     home = (await $.env.get('HOME')) ?? ''
   } catch {}
   if (!home) return $.ui.toast('Cannot log in: HOME is not set')
+  const typedSecrets = method === 'token' ? [secrets.token] : method === 'password' ? [secrets.user, secrets.pass] : []
+  // a leading '-' would be read as a flag; whitespace never belongs in a token or user name
+  if (typedSecrets.some((v) => !v || /\s/.test(v) || v.startsWith('-'))) {
+    kubeLogin = { status: 'idle', last: { ok: false, secs: null, note: method === 'token' ? 'Type the token first (no spaces).' : 'Type the user name and the password first (no spaces).' } }
+    $.ui.invalidate('ui.render')
+    return $.ui.toast('Missing ' + (method === 'token' ? 'token' : 'user name or password'))
+  }
   const host = /^https:\/\/([^:/]+)/.exec(url)[1].replace(/^api\./, '').replace(/[^A-Za-z0-9]+/g, '-')
   const reuse = kubeconfig && url === cluster.server
   const file = reuse ? kubeconfig : home + '/.kube/' + host + '.kubeconfig'
@@ -144,23 +155,26 @@ export async function loginKube($, typed, insecure = false) {
   let note = ''
   let badCert = false
   try {
-    const r = await $.process.run([KUBE_CLI, 'login', '--web', '--server=' + url, ...(insecure ? ['--insecure-skip-tls-verify'] : [])], {
-      timeoutMs: KUBE_LOGIN_MS,
+    // '=' forms, so a value can never be taken for a flag
+    const how = method === 'token' ? ['--token=' + secrets.token] : method === 'password' ? ['--username=' + secrets.user, '--password=' + secrets.pass] : ['--web']
+    const r = await $.process.run([KUBE_CLI, 'login', ...how, '--server=' + url, ...(insecure ? ['--insecure-skip-tls-verify'] : [])], {
+      timeoutMs: method === 'web' ? KUBE_LOGIN_MS : KUBE_CRED_LOGIN_MS,
       env: { KUBECONFIG: file },
     })
     ok = r.exitCode === 0
     if (!ok) {
       badCert = /x509|certificate/i.test(String(r.stderr || '') + String(r.stdout || ''))
       const line = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) ?? ''
-      note = 'exit ' + r.exitCode + (line ? ': ' + line.replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
+      note = 'exit ' + r.exitCode + (line ? ': ' + scrub(line, typedSecrets).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120) : '')
     }
   } catch (err) {
-    note = String((err && err.message) || err || 'failed').replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
+    note = scrub(String((err && err.message) || err || 'failed'), typedSecrets).replace(/https?:\/\/\S+/g, '<url>').slice(0, 120)
   }
   const secs = Math.round(((await $.clock.now()) - started) / 1000)
   kubeLogin = { status: 'idle', last: { ok, secs, note, badCert, insecure } }
   if (ok) {
     drafts.kubeServer = ''
+    clearSecrets() // kept after a failure so "Log in anyway" or a retry needs no retyping
     await discoverKubeconfigs($)
     if (file === kubeconfig) await refreshCluster($)
     else await switchKubeconfig($, file) // also re-judges prod and switches approve-all off
@@ -168,6 +182,58 @@ export async function loginKube($, typed, insecure = false) {
   } else {
     $.ui.toast('Cluster login did not finish after ' + secs + 's (' + (note || 'no detail') + ')')
   }
+  $.ui.invalidate('ui.render')
+}
+
+// Replaces every typed secret in a message that is about to be shown.
+function scrub(text, values) {
+  let out = text
+  for (const v of values) if (v) out = out.split(v).join('***')
+  return out
+}
+
+export function clearSecrets() {
+  secrets.user = ''
+  secrets.pass = ''
+  secrets.token = ''
+}
+
+// Adds a kubeconfig file you already have: checks it reads like one, copies it into ~/.kube with
+// mode 600 (a kubeconfig can hold tokens and keys) and switches to it. The original is left alone,
+// and an existing file in ~/.kube is never overwritten.
+export async function addKubeconfig($, typed) {
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {}
+  if (!home) return $.ui.toast('Cannot add a kubeconfig: HOME is not set')
+  const say = (note) => {
+    kubeAdd = { ok: false, note }
+    $.ui.invalidate('ui.render')
+    $.ui.toast(note)
+  }
+  const raw = String(typed || drafts.kubeAdd || '').trim().replace(/^['"]|['"]$/g, '')
+  if (!raw) return say('Type the path of a kubeconfig file.')
+  const src = raw === '~' ? home : raw.startsWith('~/') ? home + raw.slice(1) : raw
+  if (!src.startsWith('/')) return say('Use a full path (/… or ~/…).')
+  let head = ''
+  try {
+    head = String(await $.fs.read(src)).slice(0, 4000)
+  } catch {
+    return say('Cannot read ' + src.split('/').pop() + '.')
+  }
+  if (!/^\s*(apiVersion|clusters|contexts):/m.test(head)) return say(src.split('/').pop() + ' does not read like a kubeconfig.')
+  const name = src.split('/').pop()
+  const dest = src.startsWith(home + '/.kube/') && !src.slice((home + '/.kube/').length).includes('/') ? src : home + '/.kube/' + name
+  if (dest !== src) {
+    if (await $.fs.exists(dest)) return say(name + ' already exists in ~/.kube. Rename your file first.')
+    const r = await $.process.run(['install', '-m', '600', src, dest], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) return say('Could not copy it into ~/.kube.')
+  }
+  kubeAdd = { ok: true, note: '' }
+  drafts.kubeAdd = ''
+  await discoverKubeconfigs($)
+  await switchKubeconfig($, dest)
   $.ui.invalidate('ui.render')
 }
 

@@ -15,6 +15,8 @@ kube-deck is a [Claude Code](https://claude.com/claude-code) mod (works in the t
 │ │ my-sandbox-cluster                   non-prod  ││
 │ │ project   payments                             ││
 │ │ kubeconfig: my-sandbox-cluster.kubeconfig ▾    ││
+│ │ add file: ~/Downloads/my.kubeconfig            ││
+│ │ log in with: Browser (SSO) ▾                   ││
 │ │ api: api.other.example.com:6443  [▶ Log in]    ││
 │ ╰────────────────────────────────────────────────╯│
 │ ╭────────────────────────────────────────────────╮│
@@ -79,7 +81,7 @@ Mods are not sandboxed. Read the code before you install it, and run `claude plu
 | **Audit log** | Every cluster-changing command is logged (private file, tokens masked). |
 | **Side panel** | Cluster, AWS, guard, to-do and recent commands in one pane. |
 | **Switching** | Dropdowns to change AWS profile and kubeconfig; Claude's commands follow your pick. |
-| **Logins** | Browser login to a cluster (`oc login --web`) and to AWS SSO, creating the kubeconfig or profile for you. |
+| **Logins** | Add a kubeconfig file you already have, or log in to a cluster by browser (`oc login --web`), token or user + password, and to AWS SSO, creating the kubeconfig or profile for you. |
 | **To-do list** | Per repo; Claude can add follow-ups itself. |
 
 ## Commands
@@ -103,7 +105,8 @@ The panel opens by itself, unfocused. Beside the transcript it needs a wide full
 
 - Cluster name, project (namespace) and a badge: red `PROD`, green `non-prod`, amber `UNLISTED` (the name matches neither list, so it is treated as prod), or `STRICT` (the cluster can't be read).
 - **`kubeconfig` dropdown:** the files in `~/.kube` that read like a kubeconfig, plus the one in `KUBECONFIG`.
-- **Cluster login:** type the API URL (`api.mycluster.example.com:6443`, `https://` is added for you) and press `Log in (browser)`. It runs `oc login --web --server=<url>` into its own file, `~/.kube/<cluster>.kubeconfig`, so no kubeconfig has to exist and no other file is touched. It waits up to 10 minutes for you to approve in the browser, then switches to that file. No password or token passes through the panel; for token or password logins use a terminal. Needs an `oc` and a cluster that support `--web`. A failed login says why on the card. If it fails because the cluster's certificate is not trusted (self-signed, private CA), the card offers `Log in anyway (skip certificate check)`, or use `/kube-login <url> --insecure`. That adds `--insecure-skip-tls-verify`: the browser login still happens, but kube-deck can no longer tell the real cluster from an impostor at that address, and the setting is saved in that cluster's kubeconfig file. Prefer fixing trust (`oc login --certificate-authority=<ca.crt>` in a terminal) for anything long-lived.
+- **`add file`:** type the path of a kubeconfig you already have (`~/Downloads/my.kubeconfig`). kube-deck checks it reads like one, copies it into `~/.kube` with mode 600 and switches to it. The original is left alone and a file with the same name in `~/.kube` is never overwritten. Name it after its environment (`my-sandbox.kubeconfig`) or it counts as `UNLISTED`.
+- **Cluster login:** pick `log in with` (Browser, Token or User + password), type the API URL (`api.mycluster.example.com:6443`, `https://` is added for you) and press `Log in`. It runs `oc login` into its own file, `~/.kube/<cluster>.kubeconfig`, so no kubeconfig has to exist and no other file is touched. It waits up to 10 minutes for you to approve in the browser, then switches to that file. Browser needs a cluster that supports `--web`. **Token and password:** the panel cannot hide typed text, so what you type shows on screen and stays in the terminal's scrollback, and `oc` only takes it as an argument, so it is visible in the process list (`ps`) for the few seconds the login runs. kube-deck keeps it only in memory, never writes it to the audit log, a toast or the card (error messages have it replaced by `***`), and empties the fields once the login works or you switch method. Prefer a short-lived token over a password. A failed login says why on the card. If it fails because the cluster's certificate is not trusted (self-signed, private CA), the card offers `Log in anyway (skip certificate check)`, or use `/kube-login <url> --insecure`. That adds `--insecure-skip-tls-verify`: the browser login still happens, but kube-deck can no longer tell the real cluster from an impostor at that address, and the setting is saved in that cluster's kubeconfig file. Prefer fixing trust (`oc login --certificate-authority=<ca.crt>` in a terminal) for anything long-lived.
 
 ### AWS card
 

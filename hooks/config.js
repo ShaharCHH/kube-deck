@@ -29,6 +29,9 @@ export const AWS_LOGIN_MS = 10 * 60000
 // How long `oc login --web` may wait for you to approve in the browser (same cap as above).
 export const KUBE_LOGIN_MS = 10 * 60000
 
+// How long a token or password login may take: no browser step, so a hung server should fail fast.
+export const KUBE_CRED_LOGIN_MS = 60000
+
 // API URL typed in the panel: https, a host name, optional port. It ends up in a command line.
 export const KUBE_SERVER_RE = /^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:\d{1,5})?$/
 
