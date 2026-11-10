@@ -4,6 +4,10 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Changed
+- **The guard no longer prompts for text that only mentions a cluster command.** The classifier now reads the command line like a shell: quoted text, comments and heredoc bodies are data, so `git commit -m "fix oc delete"`, `echo "a; oc delete x"` and `cat <<EOF ... EOF` pass silently. Things that do run are still checked, also inside quotes: `$(...)`, backticks, `bash -c '...'`, `eval`, `ssh host '...'`, `bash <<EOF`, `echo "oc delete x" | bash`. Beyond three levels of nesting it assumes the command changes something.
+- A command in the background (`oc get x & oc delete y`) and `export KUBECONFIG=...; oc ...` are now seen (the second counts as retargeting).
+
 ## [0.2.1] - 2026-11-09
 
 ### Changed

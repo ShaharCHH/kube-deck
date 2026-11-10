@@ -199,7 +199,7 @@ Everything is in `hooks/config.js`:
 
 ## Limits
 
-- The classifier and the redaction are regex-based reminders, **not security boundaries**. Obfuscated shell, aliases, scripts that call `oc` internally, and `oc` inside other tools are not seen.
+- The classifier and the redaction are heuristic reminders, **not security boundaries**. Obfuscated shell, aliases, scripts that call `oc` internally, and `oc` inside other tools are not seen.
 - Redaction does not cover env values in pod specs, ConfigMaps, logs, `oc exec … env`, `cat` of a kubeconfig, or anything that isn't recognisably a secret read. It covers Bash cluster commands only, not other tools.
 - The audit log is best effort: a failed write shows a toast and does not block the command.
 - Claude Code's own permission prompt still runs after kube-deck's. Allow rules for read-only commands avoid double prompts.
