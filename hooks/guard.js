@@ -1,9 +1,9 @@
 import { classify } from './classify.js'
 import { approveActive, setApprove } from './approve.js'
-import { audit, describeVerdict, record, redactResult } from './audit.js'
+import { audit, describeVerdict, matchedHits, record, redactResult } from './audit.js'
 import { aws, awsSource } from './aws.js'
 import { cluster, refreshCluster } from './cluster.js'
-import { APPROVE_LABEL } from './config.js'
+import { APPROVE_LABEL, FALSE_POSITIVE_LABEL } from './config.js'
 import { exportPrefix, getPicked } from './picked.js'
 
 // What Claude's shell must be given so it matches the panel: everything picked, plus the AWS
@@ -29,24 +29,28 @@ export function registerGuard(on) {
     const auto = await approveActive($)
     const wouldAsk = verdict.mutating && (cluster.isProd || verdict.retarget)
     const needsApproval = wouldAsk && !auto
+    const matched = matchedHits(verdict)
+    let falsePositive = false
     if (needsApproval) {
       let answer = 'Refuse' // a dismissed question must refuse
       try {
-        answer = await $.ui.ask(describeVerdict(verdict, e.command), ['Run it', APPROVE_LABEL, 'Refuse'])
+        answer = await $.ui.ask(describeVerdict(verdict, e.command), ['Run it', APPROVE_LABEL, FALSE_POSITIVE_LABEL, 'Refuse'])
       } catch {}
       if (answer === APPROVE_LABEL) {
         await setApprove($, true)
+      } else if (answer === FALSE_POSITIVE_LABEL) {
+        falsePositive = true
       } else if (answer !== 'Run it') {
         record(at, e.command, 'refused')
-        await audit($, at, e.command, 'refused', verdict.retarget)
+        await audit($, at, e.command, 'refused', verdict.retarget, matched)
         $.ui.invalidate('ui.render')
         return { deny: 'The user declined this cluster command. Do not retry it; ask what they want instead.' }
       }
     }
     if (verdict.mutating) {
-      const outcome = needsApproval ? 'approved' : wouldAsk ? 'auto' : 'non-prod'
+      const outcome = falsePositive ? 'false-positive' : needsApproval ? 'approved' : wouldAsk ? 'auto' : 'non-prod'
       record(at, e.command, outcome)
-      await audit($, at, e.command, outcome, verdict.retarget)
+      await audit($, at, e.command, outcome, verdict.retarget, matched)
       $.ui.invalidate('ui.render')
     }
 

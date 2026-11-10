@@ -140,3 +140,12 @@ test('secret values never reach the model', async ($, on) => {
   expect(JSON.stringify(r)).not.toContain('c3VwZXJzZWNyZXQ')
   expect(String(r.result.stdout)).toContain('<redacted>')
 })
+
+test('the question names what the classifier matched, and "not a cluster command" runs it and is logged', async ($, on) => {
+  const { seen } = world(on, { kubeconfig: '/k/prod-east.kubeconfig', answer: 'Not a cluster command (run it, report it)' })
+  await $.tool.call({ tool: 'Bash', command: 'oc -n x delete pod y && oc scale deploy/z --replicas=0' } as any)
+  expect(seen.asks[0]).toContain('Matched: oc delete pod, oc scale deploy/z')
+  expect(seen.ran.length).toBe(1)
+  expect(seen.audit.at(-1).outcome).toBe('false-positive')
+  expect(seen.audit.at(-1).matched).toEqual(['oc delete pod', 'oc scale deploy/z'])
+})
