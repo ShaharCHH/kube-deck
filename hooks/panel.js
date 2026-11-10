@@ -560,6 +560,7 @@ export function registerPanel(on) {
       refused: ['REFUSED', THEME.danger],
       auto: ['AUTO', THEME.warn],
       'non-prod': ['non-prod', THEME.muted],
+      'false-positive': ['not a cmd', THEME.muted],
     }
     const activityCard = card('commands', 'Cluster commands', undefined, THEME.muted, [
       activity.length === 0

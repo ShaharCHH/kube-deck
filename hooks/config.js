@@ -93,6 +93,10 @@ export const PANE_COLUMNS = 46
 // The tool Claude can call: mcp__<plugin name>__<tool name>
 export const TODO_TOOL = 'mcp__kube-deck__todo'
 
+// Answer to the approval question for a command that is not really a cluster command (the guard
+// misread it): it runs, and the audit log records it as `false-positive` so the classifier can be fixed.
+export const FALSE_POSITIVE_LABEL = 'Not a cluster command (run it, report it)'
+
 export const APPROVE_LABEL = 'Run it + approve all for ' + APPROVE_MINUTES + ' min'
 
 export const newId = () => Math.random().toString(36).slice(2, 8)

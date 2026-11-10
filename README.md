@@ -165,7 +165,9 @@ Output of cluster commands is masked before Claude reads it.
 
 ## Audit log
 
-`~/.kube-deck/audit.jsonl` (directory `0700`, file `0600`; older world-readable files are tightened on the next write). One JSON line per cluster-changing command: time, outcome (`approved` / `auto` / `non-prod` / `refused`), cluster, project, repo, and the command with secrets masked. `/audit` shows the path and the last 10 entries.
+When the guard asks, the question ends with `Matched: oc delete pod` (what it saw, so a false alarm is obvious). If the command is not really a cluster command, answer `Not a cluster command (run it, report it)`: it runs, and the audit line gets `outcome: false-positive`. `node tests/from-audit.mjs` prints those commands as ready-to-paste classifier test cases and marks the ones the current parser still flags.
+
+`~/.kube-deck/audit.jsonl` (directory `0700`, file `0600`; older world-readable files are tightened on the next write). One JSON line per cluster-changing command: time, outcome (`approved` / `auto` / `non-prod` / `refused` / `false-positive`), cluster, project, repo, what the guard matched (`matched`, e.g. `oc delete pod`), and the command with secrets masked. `/audit` shows the path and the last 10 entries.
 
 The same masking applies to the recent-commands card. Only the logged or shown copy is masked; the command runs as written, and the approval dialog shows it as it is. It covers:
 
@@ -199,7 +201,7 @@ Everything is in `hooks/config.js`:
 
 ## Limits
 
-- The classifier and the redaction are regex-based reminders, **not security boundaries**. Obfuscated shell, aliases, scripts that call `oc` internally, and `oc` inside other tools are not seen.
+- The classifier and the redaction are heuristic reminders, **not security boundaries**. Obfuscated shell, aliases, scripts that call `oc` internally, and `oc` inside other tools are not seen.
 - Redaction does not cover env values in pod specs, ConfigMaps, logs, `oc exec … env`, `cat` of a kubeconfig, or anything that isn't recognisably a secret read. It covers Bash cluster commands only, not other tools.
 - The audit log is best effort: a failed write shows a toast and does not block the command.
 - Claude Code's own permission prompt still runs after kube-deck's. Allow rules for read-only commands avoid double prompts.
@@ -218,6 +220,7 @@ Everything is in `hooks/config.js`:
 ```
 claude plugin validate .          # manifest, hooks and state contract
 node tests/classify.test.mjs      # the command classifier
+node tests/from-audit.mjs         # false positives from your audit log, as classifier test cases
 node tests/redact.test.mjs        # secret redaction
 claude plugin test                # engine tests (guard, panel, to-do)
 claude --plugin-dir .             # run it; saving a file hot-reloads

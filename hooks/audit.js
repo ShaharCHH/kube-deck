@@ -36,7 +36,7 @@ export function isoTime(ms) {
 
 // Append one JSON line with `tee -a` (O_APPEND: safe with several sessions writing at once;
 // $.fs.write would replace the whole file). Best effort, but a failure is never silent.
-export async function audit($, at, command, outcome, retarget) {
+export async function audit($, at, command, outcome, retarget, matched) {
   try {
     const home = (await $.env.get('HOME')) ?? ''
     if (!home) throw new Error('no HOME')
@@ -52,6 +52,7 @@ export async function audit($, at, command, outcome, retarget) {
       project: cluster.namespace || null,
       repo: projectRoot || null,
       retargeted: retarget || undefined,
+      matched: matched && matched.length ? matched : undefined,
       command: maskCommand(command),
     })
     // umask 077 so a new file is born 0600; chmod below also fixes a file made by an older version.
@@ -97,6 +98,17 @@ export async function redactResult($, command, result) {
   }
 }
 
+// What the classifier found, as short strings: "oc delete pod", "helm upgrade". Only the commands that change something.
+export function matchedHits(verdict) {
+  const seen = []
+  for (const h of verdict.hits) {
+    if (!h.mutating) continue
+    const s = [h.cli, h.verb, h.sub].filter(Boolean).join(' ')
+    if (!seen.includes(s)) seen.push(s)
+  }
+  return seen
+}
+
 export function describeVerdict(verdict, command) {
   const where = cluster.known
     ? cluster.name + (cluster.namespace ? ' / ' + cluster.namespace : '') + (cluster.isProd ? ' (' + levelLabel() + ')' : '')
@@ -105,5 +117,7 @@ export function describeVerdict(verdict, command) {
     ? 'This command sets its own cluster/context, so the panel may not show where it lands.'
     : 'It changes cluster state.'
   const shown = command.length > 300 ? command.slice(0, 300) + '…' : command
-  return 'Run on ' + where + '? ' + why + '\n' + shown
+  const hits = matchedHits(verdict)
+  const matched = hits.length ? '\nMatched: ' + hits.slice(0, 4).join(', ') + (hits.length > 4 ? ' (+' + (hits.length - 4) + ' more)' : '') : ''
+  return 'Run on ' + where + '? ' + why + '\n' + shown + matched
 }
