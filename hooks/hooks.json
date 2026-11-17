@@ -1,4 +1,9 @@
 {
   "description": "kube-deck hooks module",
-  "modules": ["./register.js"]
+  "modules": ["./register.js"],
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/env-file.sh\"" }] }
+    ]
+  }
 }
