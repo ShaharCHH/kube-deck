@@ -4,6 +4,8 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-17
+
 ### Fixed
 - **Auto mode blocked Bash after a pick (#24):** the guard put `export AWS_PROFILE=…; export KUBECONFIG=…; ` in front of every Bash command, even `git`, and Claude Code gives no auto-mode verdict for a command a hook changed. Picks now reach the shell through a per-session env file (`~/.kube-deck/env/<session id>.env`) that a new `SessionStart` hook hands to Claude Code via `$CLAUDE_ENV_FILE`, so commands run as written and allow rules keep matching. Without that file the old prefix is the fallback.
 
@@ -49,6 +51,8 @@ First public release.
 - **To-do list** per repo, which Claude can add to on its own through the `mcp__kube-deck__todo` tool.
 - MIT license, a marketplace file for `/plugin install kube-deck --marketplace ShaharCHH/kube-deck`, and tests for the classifier, the redaction and the engine hooks.
 
-[Unreleased]: https://github.com/ShaharCHH/kube-deck/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ShaharCHH/kube-deck/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/ShaharCHH/kube-deck/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/ShaharCHH/kube-deck/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ShaharCHH/kube-deck/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ShaharCHH/kube-deck/releases/tag/v0.1.0
