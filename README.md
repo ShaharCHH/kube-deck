@@ -128,13 +128,15 @@ Every card's title is a button: press it (`▼` open, `▶` folded) to fold the 
 
 ### How switching reaches Claude
 
-A pick sets `AWS_PROFILE` / `KUBECONFIG` for the Claude Code process, but that alone does **not** reach the shell Claude's Bash tool runs (checked). So the guard puts `export AWS_PROFILE='…'; export KUBECONFIG='…'; ` in front of each Bash command Claude runs from then on.
+A pick sets `AWS_PROFILE` / `KUBECONFIG` for the Claude Code process, but that alone does **not** reach the shell Claude's Bash tool runs (checked). So kube-deck hands them to the shell through a per-session env file, and Claude's commands run exactly as written:
 
+- When a session starts, a `SessionStart` hook (`hooks/env-file.sh`) creates `~/.kube-deck/env/<session id>.env` (private: the folder is mode 700) and adds a line sourcing it to `$CLAUDE_ENV_FILE`. Claude Code applies that to every Bash command it runs after.
+- Before each Bash command the guard writes `export AWS_PROFILE='…'` / `export KUBECONFIG='…'` for your picks into that file. The command itself is not changed, so auto mode's review covers what runs (#24), and allow rules like `Bash(oc get:*)` keep matching.
+- Fallback: when that file is missing (the hook did not run, for example on a Claude Code without `CLAUDE_ENV_FILE`), the guard puts `export …; ` in front of the command as before. Auto mode then refuses to judge a rewritten command, and allow rules may stop matching.
 - Only what you picked is exported, plus an AWS profile the panel shows because it came from a `.aws-profile` file in the project root, or because it is the only profile in `~/.aws/config`. A profile that came from `AWS_PROFILE` itself needs nothing.
 - Picks are kept in session state, so a plugin reload does not lose them. A new session starts from your shell's values again.
-- Nothing on disk changes for a switch (no `use-context`, no config edit). Only listed values are accepted, never free text.
-- The guard still judges the command Claude wrote, not the prefix. A command you run yourself with `!` is not prefixed.
-- Claude Code's own permission prompt sees the prefixed command, so an allow rule like `Bash(oc get:*)` may stop matching after a pick.
+- No kubeconfig or AWS config changes for a switch (no `use-context`, no config edit); only the session's env file is written. Files of sessions idle for over a week are removed when a session starts. Only listed values are accepted, never free text.
+- The guard judges the command Claude wrote. A command you run yourself with `!` does not get the picks.
 - Switching kubeconfig re-judges prod / non-prod and switches approve-all off.
 
 ### Guard, to-do and commands cards

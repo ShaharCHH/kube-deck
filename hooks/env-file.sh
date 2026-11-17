@@ -20,6 +20,8 @@ fi
 umask 077 # the file holds a kubeconfig path and a profile name: private
 dir="$HOME/.kube-deck/env"
 mkdir -p "$dir"
+# one file per session: drop those of sessions that ended over a week ago
+find "$dir" -name '*.env' -type f -mtime +7 -delete 2>/dev/null || true
 f="$dir/$sid.env"
 [ -e "$f" ] || : >"$f"
 

@@ -4,7 +4,7 @@ import { audit, describeVerdict, record, redactResult } from './audit.js'
 import { aws, awsSource } from './aws.js'
 import { cluster, refreshCluster } from './cluster.js'
 import { APPROVE_LABEL } from './config.js'
-import { exportPrefix, getPicked } from './picked.js'
+import { exportPrefix, getPicked, syncEnvFile } from './picked.js'
 
 // What Claude's shell must be given so it matches the panel: everything picked, plus the AWS
 // profile on show when it did not come from AWS_PROFILE (.aws-profile, or the only profile).
@@ -16,9 +16,11 @@ export function registerGuard(on) {
   // ---- the guard: ask on prod, redact secrets from the output, write the audit log
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const verdict = classify(e.command)
-    // what the shell actually runs: the picked AWS profile / kubeconfig first, then the command.
-    // The checks below look at the original command, so they are not fooled by the prefix.
-    const prefix = exportPrefix(await shellExports($))
+    // The picked AWS profile / kubeconfig reach the shell through the session's env file, so the
+    // command runs as written. Only without that file are they put in front of the command.
+    // The checks below look at the original command, so they are not fooled by a prefix.
+    const vars = await shellExports($)
+    const prefix = (await syncEnvFile($, vars)) ? '' : exportPrefix(vars)
     const go = (ev) => next(prefix ? { ...ev, command: prefix + ev.command } : ev)
     if (!verdict.touches) return go(e)
 
