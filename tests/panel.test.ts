@@ -566,6 +566,38 @@ test('after a pick, Claude\'s Bash commands carry the picked AWS profile and kub
   await ui.unmount()
 })
 
+// Issue #24: a command a hook rewrote gets no auto-mode verdict. With the session's env file in
+// place (made by hooks/env-file.sh at session start) the picks go there and commands run as written.
+test('with the session env file in place, a pick goes to the file and commands run as written', async ($, on) => {
+  const env: Record<string, string> = { AWS_PROFILE: 'dev', KUBECONFIG: '/home/t/.kube/sandbox.kubeconfig', HOME: '/home/t' }
+  switchWorld(on, env)
+  const envFile = '/home/t/.kube-deck/env/abc-123.env'
+  const files: Record<string, string> = { [envFile]: '' }
+  on('session.id', () => ({ value: 'abc-123' }))
+  on('fs.exists', (_$: any, e: any) => ({ value: e.path in files }))
+  on('fs.write', (_$: any, e: any) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  const ran: string[] = []
+  on('tool.call', { tool: 'Bash' } as any, (_$: any, e: any) => {
+    ran.push(e.command)
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  await $.command.run({ command: 'ctx', args: '' })
+
+  const ui = await mount($, 'terminal')
+  await ui.select({ key: 'aws-profile-select', value: 'prod' })
+  await ui.select({ key: 'kubeconfig-select', value: '/home/t/.kube/prod-eu.kubeconfig' })
+  await $.tool.call({ tool: 'Bash', command: 'git branch --show-current' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'oc get pods' } as any)
+  expect(ran).toEqual(['git branch --show-current', 'oc get pods'])
+  expect(files[envFile]).toBe("export AWS_PROFILE='prod'\nexport KUBECONFIG='/home/t/.kube/prod-eu.kubeconfig'\n")
+  // only this session's file is written: no other path
+  expect(Object.keys(files)).toEqual([envFile])
+  await ui.unmount()
+})
+
 // A fake ~/.aws: files in a map, and an aws CLI that logs in (writes a token to the cache),
 // lists accounts and roles, and records every call.
 function ssoWorld(on: any, opts: { writeToken?: boolean } = {}) {

@@ -4,6 +4,9 @@ All notable changes to kube-deck. The format follows [Keep a Changelog](https://
 
 ## [Unreleased]
 
+### Fixed
+- **Auto mode blocked Bash after a pick (#24):** the guard put `export AWS_PROFILE=…; export KUBECONFIG=…; ` in front of every Bash command, even `git`, and Claude Code gives no auto-mode verdict for a command a hook changed. Picks now reach the shell through a per-session env file (`~/.kube-deck/env/<session id>.env`) that a new `SessionStart` hook hands to Claude Code via `$CLAUDE_ENV_FILE`, so commands run as written and allow rules keep matching. Without that file the old prefix is the fallback.
+
 ## [0.2.1] - 2026-11-09
 
 ### Changed
